@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# generated outputs
+segments_pair/
+comparison_output/
+junctions_*/
