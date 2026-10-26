@@ -725,7 +725,12 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig, scfg: 
                 "annotations_on_segments": len(annotations),
                 "annotations_on_nodes": len(node_annotations),
                 "inline_components": len(components),
+                "sheet_frames": len(ext["border"]["frames"]),
+                "border_texts_excluded": ext["border"]["border_texts_excluded"],
+                "border_lines_excluded": ext["border"]["border_lines_excluded"],
+                "table_components_dropped": len(ext["border"]["table_components_dropped"]),
             },
+            "sheet_border": ext["border"],
             "nodes": node_json,
             "junctions": ext["junctions"],
             "segments": out_segments,
@@ -838,8 +843,9 @@ def render_initial_marks(pdf: str, page_no: int, data: dict, marks: List[Tuple[i
         by_idx = {s["segment_index"]: s for s in data["segments"]}
         for idx, col in marks:
             draw_route(img, by_idx[idx]["polyline"], col, zoom)
-        eng.put_label(img, "Initial key-based comparison: orange=changed, red=removed (A), green=added (B)",
-                      (10, 24), (0, 0, 0), 0.6)
+        img = eng.add_legend_strip(img, [("changed", (0, 140, 255)), ("removed (PDF A)", (0, 0, 230)),
+                                         ("added (PDF B)", (0, 170, 0))],
+                                   title="Initial key-based comparison (Script 2)")
         cv2.imwrite(path, img)
     finally:
         if doc is not None:
@@ -890,6 +896,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"   segments {s['segments']}, junctions {s['junctions']}, nodes {s['node_kinds']}, "
                   f"annotations {s['annotations_on_segments']}+{s['annotations_on_nodes']} (node), "
                   f"inline components {s['inline_components']}")
+            print(f"   sheet border: {s['sheet_frames']} frame(s); excluded {s['border_lines_excluded']} line(s), "
+                  f"{s['border_texts_excluded']} margin text(s), {s['table_components_dropped']} table component(s)")
         if "a" in results and "b" in results:
             cmp_res = initial_compare(results["a"], results["b"])
             p = os.path.join(args.out, "segment_comparison_initial.json")

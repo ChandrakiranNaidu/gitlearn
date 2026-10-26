@@ -22,6 +22,9 @@ Synthetic drawing (PDF A), all wires 0.539 pt, junction = filled dot + ring:
 PDF B = same harness shifted by (15, 10), every wire drawn in reverse direction and
 order, 52 -> 53 and 51 -> 57 (so junction J2 changes two of its three depth-1 labels),
 the CLAMP annotation deleted, 105 nudged by 1 pt.
+PDF C = PDF A plus a sheet border drawn with the WIRE stroke width (double frame, zone
+ticks, zone numbers, a title-block table hanging on the frame) and a crop box that cuts
+through the terminal name 7554VC-A.  A versus C must show no difference at all.
 """
 
 from __future__ import annotations
@@ -85,8 +88,7 @@ def build_pdf(path: str, variant: str) -> None:
     box(40, 100, "7554VC-A")
     wire((43, 100), (100, 100))
     htext(72 - (1.0 if variant == "B" else 0.0), 105.5, "105")
-    if variant == "A" or True:
-        htext(72, 94.5, "999")                       # above the wire: invalid everywhere
+    htext(72, 94.5, "999")                           # above the wire: invalid everywhere
     dot(100, 100)
     wire((100, 100), (200, 100))
     htext(150, 105.5, "57" if variant == "B" else "51")    # label inside both junction ids
@@ -106,7 +108,7 @@ def build_pdf(path: str, variant: str) -> None:
     wire((215, 125), (277, 125))
     htext(235, 130.5, "41")
     box(280, 125, "14MP-A", side="right")
-    if variant == "A":
+    if variant in ("A", "C"):
         page.draw_line(P(258, 125), P(258, 116), color=(0, 0, 0), width=0.337)
         page.draw_oval(fitz.Rect(P(251, 111), P(265, 116)), color=(0, 0, 0), width=0.877)
         htext(258, 113.5, "MARKER")
@@ -150,8 +152,32 @@ def build_pdf(path: str, variant: str) -> None:
         if variant == "B":
             a, b = b, a
         page.draw_line(P(*a), P(*b), color=(0, 0, 0), width=0.539)
+    if variant == "C":
+        add_sheet_border(page, htext)
+        page.set_cropbox(fitz.Rect(20, 0, 600, 400))   # cuts the first characters of 7554VC-A
     doc.save(path)
     doc.close()
+
+
+def add_sheet_border(page, htext, width: float = 0.539) -> None:
+    """Frame, zone ticks, zone numbers and a title-block table, all with the wire stroke width."""
+    outer, inner = (1, 26, 594, 384), (5, 30, 590, 380)
+    for r in (outer, inner):
+        page.draw_rect(fitz.Rect(*r), color=(0, 0, 0), width=width)
+    for k in range(8):
+        x = outer[0] + k * (outer[2] - outer[0]) / 8
+        if k:
+            page.draw_line(fitz.Point(x, outer[1]), fitz.Point(x, inner[1]), color=(0, 0, 0), width=width)
+            page.draw_line(fitz.Point(x, inner[3]), fitz.Point(x, outer[3]), color=(0, 0, 0), width=width)
+        xc = x + (outer[2] - outer[0]) / 16
+        for yc in (28.0, 382.0):
+            w = fitz.get_text_length(str(8 - k), fontname="helv", fontsize=3.5)
+            page.insert_text(fitz.Point(xc - w / 2, yc + 1.2), str(8 - k), fontsize=3.5, fontname="helv")
+    for y in (330, 342, 354, 366):                     # title block rows end on the frame
+        page.draw_line(fitz.Point(450, y), fitz.Point(inner[2], y), color=(0, 0, 0), width=width)
+        htext(485, y + 5.5, str(100 + (y - 330) // 12))
+    for x in (450, 520):                               # columns end on the frame
+        page.draw_line(fitz.Point(x, 330), fitz.Point(x, inner[3]), color=(0, 0, 0), width=width)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +318,31 @@ def main() -> int:
     check(sm["entire_branches_removed"] == 0 and sm["entire_branches_added"] == 0,
           "no false branch removal / addition (shift, reverse traversal, nudged 105)")
     check(sm["same_exact"] + sm["same_probable"] == sm["segments_a"] - 3, "all other segments are the same")
+    print("5. sheet border at wire width + crop through a terminal name (A vs C)")
+    pc = os.path.join(tmp, "c.pdf")
+    build_pdf(pc, "C")
+    seg_c, out_c = os.path.join(tmp, "segments_border"), os.path.join(tmp, "comparison_border")
+    r = run([os.path.join(ROOT, "build_logical_segments.py"), "--pdf-a", pa, "--pdf-b", pc, "--out", seg_c,
+             "--no-images"])
+    check(r.returncode == 0, "Script 2 runs on the bordered PDF")
+    r = run([os.path.join(ROOT, "compare_and_render_segments_v6.py"), "--pdf-a", pa, "--pdf-b", pc,
+             "--segments-a", os.path.join(seg_c, "pdf_a_segments.json"),
+             "--segments-b", os.path.join(seg_c, "pdf_b_segments.json"), "--out", out_c, "--zoom", "2"])
+    check(r.returncode == 0, "Script 3 runs on the bordered PDF")
+    if r.returncode == 0:
+        sc = json.load(open(os.path.join(seg_c, "pdf_b_segments.json")))
+        cc = json.load(open(os.path.join(out_c, "segment_comparison_v6.json")))
+        check(sc["sheet_border"]["drawing_area"] is not None, "sheet frame detected in the bordered PDF")
+        check(len(sc["sheet_border"]["table_components_dropped"]) >= 1, "title-block table dropped")
+        check(sc["summary"]["segments"] == json.load(open(os.path.join(seg_c, "pdf_a_segments.json")))["summary"]["segments"],
+              "bordered PDF has exactly the harness segments of the plain PDF")
+        sm = cc["summary"]
+        check(sm["changed"] == 0 and sm["review"] == 0 and sm["entire_branches_removed"] == 0
+              and sm["entire_branches_added"] == 0, f"border creates no findings (summary {sm['changed']}/{sm['review']}/"
+              f"{sm['entire_branches_removed']}/{sm['entire_branches_added']})")
+        check(sm["same_exact"] == sm["segments_a"], "every segment is same exact")
+        names = {ep.get("name") for s in sc["segments"] for ep in (s["start"], s["end"])}
+        check("7554VC-A" in names, "terminal name cut by the crop box is read in full")
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) FAILED (work dir {tmp})")

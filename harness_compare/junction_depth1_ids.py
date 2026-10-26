@@ -195,6 +195,11 @@ class EngineConfig:
     element_text_radius: float = 22.0
     # Text splitting
     text_gap_factor: float = 0.8
+    # Sheet border (drawing frame, zone markers, title-block tables)
+    border_detection: bool = True
+    border_min_fraction: float = 0.6       # frame rectangle covers at least this share of page width / height
+    border_corner_tol: float = 2.5
+    border_band_tol: float = 1.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -392,9 +397,15 @@ def _split_span_chars(chars: List[dict], d: Sequence[float], size: float, gap_fa
 
 
 def extract_text_objects(page, M, cfg: EngineConfig) -> List[dict]:
-    """Extract text objects (word groups) in the displayed frame."""
+    """Extract text objects (word groups) in the displayed frame.
+
+    Characters are read without clipping and a whole word is kept when any part of it
+    is on the visible page, so a name cut by the crop box is not shortened ('174VN' for
+    '6174VN'), while text of other sheets placed off the page is ignored.
+    """
     flags = fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES
-    raw = page.get_text("rawdict", flags=flags)
+    raw = page.get_text("rawdict", flags=flags, clip=fitz.INFINITE_RECT())
+    visible = page.rect
     out: List[dict] = []
     tol = math.sin(math.radians(cfg.text_axis_tol_deg))
     for block in raw.get("blocks", []):
@@ -404,6 +415,8 @@ def extract_text_objects(page, M, cfg: EngineConfig) -> List[dict]:
             ld = line.get("dir", (1.0, 0.0))
             vd = unit(vec_to_view(M, ld))
             for span in line.get("spans", []):
+                if not (fitz.Rect(span["bbox"]) * M).intersects(visible):
+                    continue                  # text of another sheet placed off the page
                 chars = span.get("chars") or []
                 size = float(span.get("size", 0.0))
                 for group in _split_span_chars(chars, ld, size, cfg.text_gap_factor):
@@ -417,6 +430,8 @@ def extract_text_objects(page, M, cfg: EngineConfig) -> List[dict]:
                         rect |= fitz.Rect(c["bbox"]) * M
                     if rect.is_empty and vis:
                         rect = fitz.Rect(vis[0]["bbox"]) * M
+                    if not rect.intersects(visible):
+                        continue
                     cx, cy = (rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0
                     if abs(vd[1]) <= tol:
                         orientation = "horizontal"
@@ -556,8 +571,120 @@ def clip_segment(a: Sequence[float], b: Sequence[float], r) -> Optional[Tuple[Tu
     return ((x0 + t0 * dx, y0 + t0 * dy), (x0 + t1 * dx, y0 + t1 * dy))
 
 
-def auto_wire_width(page, M, drawings: Optional[list] = None) -> Optional[float]:
-    """Pick the stroke width carrying the largest total length of long black lines."""
+# ---------------------------------------------------------------------------
+# Sheet border: drawing frame, zone markers, title-block tables
+# ---------------------------------------------------------------------------
+
+def _merge_collinear(lines: List[Tuple[float, float, float]]) -> List[Tuple[float, float, float]]:
+    """(lo, hi, c) axis-aligned lines -> merged extents per coordinate c, longest first."""
+    out: List[List[float]] = []
+    for lo, hi, c in sorted(lines, key=lambda l: (l[2], l[0])):
+        for m in out:
+            if abs(m[2] - c) <= 0.6 and lo <= m[1] + 2.0 and hi >= m[0] - 2.0:
+                m[0], m[1] = min(m[0], lo), max(m[1], hi)
+                break
+        else:
+            out.append([lo, hi, c])
+    out.sort(key=lambda m: -(m[1] - m[0]))
+    return [tuple(m) for m in out]
+
+
+def detect_sheet_border(page, M, drawings: list, text_centres: List[Tuple[float, float]],
+                        cfg: EngineConfig) -> dict:
+    """Drawing frame(s): large axis-aligned rectangles framing the sheet, any stroke width.
+
+    A frame may be one rectangle path or four separate lines and may run partly off the
+    page.  It must cover >= border_min_fraction of the page in both directions, be at most
+    about one page in size (multi-sheet PDFs place other sheets off the page), overlap at
+    least half the page and enclose most of the page text.  Returns the frames (outermost
+    first, displayed frame) and the innermost one, which bounds the drawing area.
+    """
+    W, H = page.rect.width, page.rect.height
+    if not cfg.border_detection:
+        return {"frames": [], "inner": None}
+    rects, hs, vs = [], [], []
+    for d in drawings:
+        if "s" not in (d.get("type") or "") or _is_white(d.get("color")):
+            continue
+        for kind, pts in _path_items_view(d.get("items", []), M):
+            if kind == "poly":
+                segs = list(zip(pts, pts[1:]))
+                if all(abs(a[0] - b[0]) <= 0.5 or abs(a[1] - b[1]) <= 0.5 for a, b in segs):
+                    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                    rects.append((min(xs), min(ys), max(xs), max(ys)))
+            elif kind == "l":
+                segs = [(pts[0], pts[1])]
+            else:
+                continue
+            for a, b in segs:
+                if abs(a[1] - b[1]) <= 0.5 and abs(a[0] - b[0]) >= 0.5 * W:
+                    hs.append((min(a[0], b[0]), max(a[0], b[0]), (a[1] + b[1]) / 2))
+                elif abs(a[0] - b[0]) <= 0.5 and abs(a[1] - b[1]) >= 0.5 * H:
+                    vs.append((min(a[1], b[1]), max(a[1], b[1]), (a[0] + b[0]) / 2))
+    hs, vs = _merge_collinear(hs)[:16], _merge_collinear(vs)[:16]
+    t = cfg.border_corner_tol
+    for top in hs:
+        for bot in hs:
+            if bot[2] - top[2] < cfg.border_min_fraction * H:
+                continue
+            for left in vs:
+                for right in vs:
+                    x0, x1, y0, y1 = left[2], right[2], top[2], bot[2]
+                    if x1 - x0 < cfg.border_min_fraction * W:
+                        continue
+                    if all(l[0] <= a + t and l[1] >= b - t for l, a, b in
+                           ((top, x0, x1), (bot, x0, x1), (left, y0, y1), (right, y0, y1))):
+                        rects.append((x0, y0, x1, y1))
+    frames: List[Tuple[float, float, float, float]] = []
+    for r in rects:
+        w, h = r[2] - r[0], r[3] - r[1]
+        if w < cfg.border_min_fraction * W or h < cfg.border_min_fraction * H:
+            continue
+        if w > 1.15 * W or h > 1.15 * H:
+            continue          # spans several sheets placed side by side: not this sheet's frame
+        ix = max(0.0, min(r[2], W) - max(r[0], 0.0))
+        iy = max(0.0, min(r[3], H) - max(r[1], 0.0))
+        if ix * iy < 0.5 * W * H:
+            continue
+        if text_centres:
+            inside = sum(1 for c in text_centres if r[0] <= c[0] <= r[2] and r[1] <= c[1] <= r[3])
+            if inside < 0.75 * len(text_centres):
+                continue
+        if any(all(abs(r[k] - f[k]) <= 1.0 for k in range(4)) for f in frames):
+            continue
+        frames.append(r)
+    frames.sort(key=lambda r: -(r[2] - r[0]) * (r[3] - r[1]))
+    return {"frames": [tuple(rnd(v) for v in f) for f in frames], "inner": frames[-1] if frames else None}
+
+
+def _outside(p: Sequence[float], r: Sequence[float], tol: float) -> bool:
+    return p[0] < r[0] - tol or p[0] > r[2] + tol or p[1] < r[1] - tol or p[1] > r[3] + tol
+
+
+def _inside(p: Sequence[float], r: Sequence[float], tol: float) -> bool:
+    return r[0] + tol < p[0] < r[2] - tol and r[1] + tol < p[1] < r[3] - tol
+
+
+def is_border_segment(a: Sequence[float], b: Sequence[float], border: Optional[dict], tol: float = 1.0) -> bool:
+    """True for a frame edge, or a line in the margin band outside the drawing area (zone ticks)."""
+    if not border or not border.get("frames"):
+        return False
+    for x0, y0, x1, y1 in border["frames"]:
+        for e0, e1 in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x0, y1), (x1, y1)), ((x0, y0), (x0, y1))):
+            if point_segment_distance(a, e0, e1)[0] <= tol and point_segment_distance(b, e0, e1)[0] <= tol:
+                return True
+    inner = border["inner"]
+    mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    return _outside(mid, inner, tol) and not _inside(a, inner, tol) and not _inside(b, inner, tol)
+
+
+def is_border_text(t: dict, border: Optional[dict], tol: float = 0.5) -> bool:
+    """Zone numbers / letters printed in the margin band outside the drawing area."""
+    return bool(border and border.get("inner")) and _outside(t["center"], border["inner"], tol)
+
+
+def auto_wire_width(page, M, drawings: Optional[list] = None, border: Optional[dict] = None) -> Optional[float]:
+    """Pick the stroke width carrying the largest total length of long black lines (border excluded)."""
     totals: Dict[float, float] = defaultdict(float)
     for d in (drawings if drawings is not None else page.get_drawings()):
         if "s" not in (d.get("type") or "") or _is_dashed(d.get("dashes")) or _is_white(d.get("color")):
@@ -567,20 +694,26 @@ def auto_wire_width(page, M, drawings: Optional[list] = None) -> Optional[float]
             continue
         for it in d.get("items", []):
             if it[0] == "l":
-                L = dist(to_view(M, it[1]), to_view(M, it[2]))
-                if L >= 8.0:
+                a, b = to_view(M, it[1]), to_view(M, it[2])
+                L = dist(a, b)
+                if L >= 8.0 and not is_border_segment(a, b, border):
                     totals[w] += L
     if not totals:
         return None
     return max(totals.items(), key=lambda kv: kv[1])[0]
 
 
-def extract_vectors(page, M, cfg: EngineConfig) -> dict:
-    """Extract wires, raw circles, other (non-wire) lines and closed symbol shapes."""
-    drawings = page.get_drawings()
+def extract_vectors(page, M, cfg: EngineConfig, drawings: Optional[list] = None,
+                    border: Optional[dict] = None) -> dict:
+    """Extract wires, raw circles, other (non-wire) lines and closed symbol shapes.
+
+    Sheet-border lines (frame edges, zone ticks in the margin band) are never wires and
+    never terminal-symbol geometry, whatever their stroke width.
+    """
+    drawings = page.get_drawings() if drawings is None else drawings
     wire_width = cfg.wire_width
     if wire_width is None:
-        wire_width = auto_wire_width(page, M, drawings)
+        wire_width = auto_wire_width(page, M, drawings, border)
         if wire_width is None:
             raise RuntimeError("Could not auto-detect the harness wire stroke width; pass --wire-width.")
     prect = page.rect
@@ -593,6 +726,7 @@ def extract_vectors(page, M, cfg: EngineConfig) -> dict:
     circles: List[dict] = []
     other_lines: List[dict] = []
     shapes: List[dict] = []
+    border_lines = 0
     for di, d in enumerate(drawings):
         dtype = d.get("type") or ""
         width = float(d.get("width") or 0.0)
@@ -621,6 +755,9 @@ def extract_vectors(page, M, cfg: EngineConfig) -> dict:
         if any(k == "poly" for k, _ in view_items):
             closed = True
         for (a, b, ii, kind) in segs:
+            if is_border_segment(a, b, border):
+                border_lines += 1
+                continue
             if is_wire:
                 clipped = clip_segment(a, b, prect)   # wires running off the sheet end at the page edge
                 if clipped is None:
@@ -637,7 +774,7 @@ def extract_vectors(page, M, cfg: EngineConfig) -> dict:
                 rec["dashed"] = dashed
                 rec["filled"] = bool(filled)
                 other_lines.append(rec)
-        if not is_wire and closed and segs:
+        if not is_wire and closed and segs and not all(is_border_segment(a, b, border) for a, b, _, _ in segs):
             xs = [p[0] for s in segs for p in (s[0], s[1])]
             ys = [p[1] for s in segs for p in (s[0], s[1])]
             bb = (min(xs), min(ys), max(xs), max(ys))
@@ -653,7 +790,7 @@ def extract_vectors(page, M, cfg: EngineConfig) -> dict:
     for i, s in enumerate(shapes):
         s["id"] = f"S{i:04d}"
     return {"wire_width": wire_width, "wires": wires, "circles_raw": circles,
-            "other_lines": other_lines, "shapes": shapes}
+            "other_lines": other_lines, "shapes": shapes, "border_lines_excluded": border_lines}
 
 
 # ---------------------------------------------------------------------------
@@ -912,8 +1049,77 @@ def build_wire_graph(vec: dict, symbols: List[dict], cfg: EngineConfig) -> dict:
         nodes[v]["edges"].append(e["id"])
 
     graph = {"nodes": nodes, "edges": edges, "pieces": pieces}
+    drop_table_components(graph, vec.get("page_size"), vec.get("border"))
     classify_nodes(graph, vec, cfg)
     return graph
+
+
+def drop_table_components(graph: dict, page_size: Optional[Tuple[float, float]], border: Optional[dict]) -> None:
+    """Remove wire-width components that are drawing tables or frames, not harness.
+
+    A component is dropped when it has no junction dot or circular element, only
+    horizontal / vertical edges, and either closed cells (two or more independent cycles,
+    or one cycle when it touches the drawing frame or spans most of the page, e.g. an
+    undetected frame), or every free end resting on the drawing frame (a title block or
+    revision table hanging on the frame; table lines cross without connecting, so such a
+    table can be cycle-free).  Harness routes have dotted junctions and end at terminals.
+    """
+    frame_edges = []
+    for x0, y0, x1, y1 in (border or {}).get("frames", []):
+        frame_edges += [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x0, y1), (x1, y1)), ((x0, y0), (x0, y1))]
+
+    def on_frame(p) -> bool:
+        return any(point_segment_distance(p, a, b)[0] <= 1.5 for a, b in frame_edges)
+
+    nodes, edges = graph["nodes"], graph["edges"]
+    seen = set()
+    drop_edges = set()
+    dropped = []
+    for start in range(len(nodes)):
+        if start in seen or not nodes[start]["edges"]:
+            continue
+        comp, stack = set(), [start]
+        while stack:
+            n = stack.pop()
+            if n in comp:
+                continue
+            comp.add(n)
+            for eid in nodes[n]["edges"]:
+                e = edges[eid]
+                stack.extend((e["u"], e["v"]))
+        seen |= comp
+        ceids = {eid for n in comp for eid in nodes[n]["edges"]}
+        if any(nodes[n]["symbol"] is not None for n in comp):
+            continue
+        if not all(abs(edges[e]["pu"][0] - edges[e]["pv"][0]) <= 0.5 or abs(edges[e]["pu"][1] - edges[e]["pv"][1]) <= 0.5
+                   for e in ceids):
+            continue
+        cycles = len(ceids) - len(comp) + 1
+        xs = [p[0] for e in ceids for p in (edges[e]["pu"], edges[e]["pv"])]
+        ys = [p[1] for e in ceids for p in (edges[e]["pu"], edges[e]["pv"])]
+        bb = (min(xs), min(ys), max(xs), max(ys))
+        big = bool(page_size) and (bb[2] - bb[0]) >= 0.6 * page_size[0] and (bb[3] - bb[1]) >= 0.6 * page_size[1]
+        touches = False
+        if border and border.get("inner"):
+            r = border["inner"]
+            touches = min(abs(bb[0] - r[0]), abs(bb[2] - r[2]), abs(bb[1] - r[1]), abs(bb[3] - r[3])) <= 2.5
+        free_ends = [n for n in comp if len(nodes[n]["edges"]) == 1]
+        hangs = bool(frame_edges) and bool(free_ends) and all(on_frame(nodes[n]["point"]) for n in free_ends)
+        if cycles >= 2 or (cycles >= 1 and (touches or big)) or hangs:
+            drop_edges |= ceids
+            dropped.append({"bbox": [rnd(v) for v in bb], "edges": len(ceids), "cycles": cycles,
+                            "reason": "hangs on the drawing frame" if hangs and cycles < 1 else "closed table / frame cells"})
+    if not drop_edges:
+        graph["dropped_components"] = []
+        return
+    keep = [e for e in edges if e["id"] not in drop_edges]
+    remap = {e["id"]: i for i, e in enumerate(keep)}
+    for i, e in enumerate(keep):
+        e["id"] = i
+    for n in nodes:
+        n["edges"] = [remap[eid] for eid in n["edges"] if eid in remap]
+    graph["edges"] = keep
+    graph["dropped_components"] = dropped
 
 
 def edge_far(graph: dict, eid: int, node_id: int) -> Tuple[int, Tuple[float, float], Tuple[float, float]]:
@@ -1194,13 +1400,25 @@ def compute_depth1_ids(graph: dict, texts: List[dict], cfg: EngineConfig) -> Lis
 def extract_page(page, cfg: EngineConfig) -> dict:
     """Run text + vector extraction, symbols, graph and depth-1 ids for one page."""
     M = page_matrix(page)
-    texts = extract_text_objects(page, M, cfg)
-    vec = extract_vectors(page, M, cfg)
+    all_texts = extract_text_objects(page, M, cfg)
+    drawings = page.get_drawings()
+    border = detect_sheet_border(page, M, drawings, [tuple(t["center"]) for t in all_texts], cfg)
+    texts = [t for t in all_texts if not is_border_text(t, border)]
+    for i, t in enumerate(texts):
+        t["id"] = f"T{i:05d}"
+    vec = extract_vectors(page, M, cfg, drawings, border)
+    vec["border"] = border
+    vec["page_size"] = (page.rect.width, page.rect.height)
     symbols = build_symbols(vec, cfg)
     graph = build_wire_graph(vec, symbols, cfg)
     junctions = compute_depth1_ids(graph, texts, cfg)
+    border_report = {"frames": [list(f) for f in border["frames"]],
+                     "drawing_area": [rnd(v) for v in border["inner"]] if border["inner"] else None,
+                     "border_texts_excluded": len(all_texts) - len(texts),
+                     "border_lines_excluded": vec["border_lines_excluded"],
+                     "table_components_dropped": graph.get("dropped_components", [])}
     return {"matrix": M, "texts": texts, "vectors": vec, "symbols": symbols,
-            "graph": graph, "junctions": junctions}
+            "graph": graph, "junctions": junctions, "border": border_report}
 
 
 def symbols_to_json(symbols: List[dict]) -> List[dict]:
@@ -1245,6 +1463,26 @@ def put_label(img: np.ndarray, text: str, org: Tuple[int, int], color, scale: fl
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
+def add_legend_strip(img: np.ndarray, entries: List[Tuple[str, Optional[tuple]]], title: Optional[str] = None) -> np.ndarray:
+    """Legend in a white strip BELOW the page image, so it never hides drawing content.
+
+    The drawing keeps its pixel mapping (point * zoom); the strip only extends the canvas.
+    """
+    rows = ([(title, None)] if title else []) + list(entries)
+    h = 16 + 26 * len(rows)
+    strip = np.full((h, img.shape[1], 3), 255, dtype=np.uint8)
+    cv2.line(strip, (0, 1), (img.shape[1] - 1, 1), (120, 120, 120), 1)
+    for k, (text, col) in enumerate(rows):
+        y = 24 + 26 * k
+        x = 12
+        if col is not None:
+            cv2.line(strip, (x, y - 6), (x + 34, y - 6), col, 5)
+            x += 46
+        cv2.putText(strip, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6 if col is None and k == 0 and title else 0.52,
+                    (0, 0, 0), 1, cv2.LINE_AA)
+    return np.vstack([img, strip])
+
+
 SYMBOL_COLORS = {
     "junction_dot": (0, 0, 230),
     "two_direction_dot": (0, 140, 255),
@@ -1273,11 +1511,14 @@ def draw_wires_and_text(img: np.ndarray, ext: dict, zoom: float) -> np.ndarray:
             col = {"terminal": (0, 140, 0), "open": (0, 0, 255), "branch": (255, 0, 255),
                    "element": (180, 0, 180)}[n["kind"]]
             cv2.circle(out, zp(n["point"], zoom), max(5, int(2.5 * zoom)), col, 2, cv2.LINE_AA)
-    legend = ["wires: blue", "numeric text: green=horizontal, magenta=vertical, orange=angled",
-              "non-numeric text: grey", "nodes: green=terminal, red=open, magenta=branch, purple=element"]
-    for i, s in enumerate(legend):
-        put_label(out, s, (10, 22 + 20 * i), (0, 0, 0), 0.55)
-    return out
+    for f in ext.get("border", {}).get("frames", []):
+        cv2.rectangle(out, zp((f[0], f[1]), zoom), zp((f[2], f[3]), zoom), (0, 200, 255), 1)
+    return add_legend_strip(out, [
+        ("wires", (255, 120, 0)),
+        ("numeric text: horizontal", (0, 160, 0)), ("numeric text: vertical", (200, 0, 200)),
+        ("numeric text: angled", (0, 120, 255)), ("non-numeric text", (150, 150, 150)),
+        ("nodes: terminal", (0, 140, 0)), ("nodes: open end", (0, 0, 255)), ("nodes: branch", (255, 0, 255)),
+        ("nodes: circular element", (180, 0, 180)), ("detected sheet frame (excluded)", (0, 200, 255))])
 
 
 def draw_junction_diagnostics(img: np.ndarray, ext: dict, zoom: float) -> np.ndarray:
@@ -1300,11 +1541,11 @@ def draw_junction_diagnostics(img: np.ndarray, ext: dict, zoom: float) -> np.nda
         jp = zp(j["point"], zoom)
         cv2.circle(out, jp, max(5, int(2 * zoom)), (0, 0, 230), -1, cv2.LINE_AA)
         put_label(out, j["structural_id"], (jp[0] + 6, jp[1] - 6), (0, 0, 160), 0.45)
-    legend = ["red=junction dot, orange=two-direction dot, yellow=endpoint dot, cyan=hollow symbol,",
-              "purple=large element, coloured paths = traced outgoing directions, boxes = chosen labels"]
-    for i, s in enumerate(legend):
-        put_label(out, s, (10, 22 + 20 * i), (0, 0, 0), 0.55)
-    return out
+    return add_legend_strip(out, [
+        ("junction dot", SYMBOL_COLORS["junction_dot"]), ("two-direction dot", SYMBOL_COLORS["two_direction_dot"]),
+        ("endpoint dot", SYMBOL_COLORS["endpoint_dot"]), ("hollow symbol", SYMBOL_COLORS["hollow_symbol"]),
+        ("large circular element", SYMBOL_COLORS["large_hollow_element"]),
+        ("coloured paths: traced outgoing directions, boxes: chosen first labels", None)])
 
 
 # ---------------------------------------------------------------------------
@@ -1366,7 +1607,12 @@ def run(pdf: str, out_dir: str, page_no: int, zoom: float, cfg: EngineConfig, im
                 "node_kinds": dict(node_kinds),
                 "junctions": sum(1 for j in ext["junctions"] if j["kind"] == "junction"),
                 "branch_points": sum(1 for j in ext["junctions"] if j["kind"] == "branch"),
+                "sheet_frames": len(ext["border"]["frames"]),
+                "border_texts_excluded": ext["border"]["border_texts_excluded"],
+                "border_lines_excluded": ext["border"]["border_lines_excluded"],
+                "table_components_dropped": len(ext["border"]["table_components_dropped"]),
             },
+            "sheet_border": ext["border"],
             "junctions": ext["junctions"],
             "symbols": symbols_to_json(ext["symbols"]),
             "texts": ext["texts"],
@@ -1414,6 +1660,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Circle symbols : {s['circle_symbols']}  {s['symbol_kinds']}")
     print(f"Graph          : {s['graph_nodes']} nodes, {s['graph_edges']} edges  {s['node_kinds']}")
     print(f"Junctions      : {s['junctions']}  (unexpected branch points: {s['branch_points']})")
+    print(f"Sheet border   : {s['sheet_frames']} frame(s); excluded {s['border_lines_excluded']} line(s), "
+          f"{s['border_texts_excluded']} margin text(s), {s['table_components_dropped']} table component(s)")
     for p in data["_written"]:
         print(f"Wrote          : {p}")
     return 0

@@ -139,6 +139,11 @@ class V6Config:
     topology_content_min: float = 0.75
     topology_endpoint_min: float = 0.55
     terminal_change_min_confidence: float = 0.6
+    # Sheet border (drawing frame, zone markers)
+    border_detection: bool = True
+    border_min_fraction: float = 0.6
+    border_corner_tol: float = 2.5
+    border_segment_fraction: float = 0.9   # JSON segments this much on the border are ignored
     # Output
     mark_same: bool = False
 
@@ -347,7 +352,11 @@ def to_view(M, p) -> Tuple[float, float]:
 def extract_texts(page, cfg: V6Config) -> List[dict]:
     """All text objects (word groups) in the displayed frame, each with a unique ID."""
     M = page.rotation_matrix
-    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES)
+    # read without clipping and keep whole words that are at least partly visible, so a name
+    # cut by the crop box is not shortened, and other sheets placed off the page are ignored
+    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES,
+                        clip=fitz.INFINITE_RECT())
+    visible = page.rect
     tol = math.sin(math.radians(cfg.text_axis_tol_deg))
     out = []
     for block in raw.get("blocks", []):
@@ -357,6 +366,8 @@ def extract_texts(page, cfg: V6Config) -> List[dict]:
             ld = line.get("dir", (1.0, 0.0))
             vd = unit((M.a * ld[0] + M.c * ld[1], M.b * ld[0] + M.d * ld[1]))
             for span in line.get("spans", []):
+                if not (fitz.Rect(span["bbox"]) * M).intersects(visible):
+                    continue                  # text of another sheet placed off the page
                 size = float(span.get("size", 0.0))
                 groups: List[List[dict]] = []
                 cur: List[dict] = []
@@ -387,6 +398,8 @@ def extract_texts(page, cfg: V6Config) -> List[dict]:
                     for c in g:
                         if c.get("c", "").strip():
                             rect |= fitz.Rect(c["bbox"]) * M
+                    if not rect.intersects(visible):
+                        continue
                     if abs(vd[1]) <= tol:
                         orientation = "horizontal"
                     elif abs(vd[0]) <= tol:
@@ -430,8 +443,112 @@ def _bezier(p0, p1, p2, p3, n=6):
     return pts
 
 
-def auto_wire_width(page, drawings: Optional[list] = None) -> Optional[float]:
-    """Stroke width carrying the largest total length of long, solid, black lines."""
+def _merge_collinear(lines):
+    out = []
+    for lo, hi, c in sorted(lines, key=lambda l: (l[2], l[0])):
+        for m in out:
+            if abs(m[2] - c) <= 0.6 and lo <= m[1] + 2.0 and hi >= m[0] - 2.0:
+                m[0], m[1] = min(m[0], lo), max(m[1], hi)
+                break
+        else:
+            out.append([lo, hi, c])
+    out.sort(key=lambda m: -(m[1] - m[0]))
+    return [tuple(m) for m in out]
+
+
+def detect_sheet_border(page, drawings: list, text_centres: List[Tuple[float, float]], cfg: V6Config) -> dict:
+    """Drawing frame(s): large axis-aligned rectangles framing the sheet (any stroke width).
+
+    Same rule as Script 1: one rectangle path or four lines, >= border_min_fraction of the
+    page in both directions, at most about one page in size, overlapping at least half the
+    page and enclosing most of the page text.  The innermost frame bounds the drawing area.
+    """
+    W, H = page.rect.width, page.rect.height
+    if not cfg.border_detection:
+        return {"frames": [], "inner": None}
+    M = page.rotation_matrix
+    rects, hs, vs = [], [], []
+    for d in drawings:
+        if "s" not in (d.get("type") or "") or _is_white(d.get("color")):
+            continue
+        for it in d.get("items", []):
+            if it[0] == "l":
+                segs = [(to_view(M, it[1]), to_view(M, it[2]))]
+            elif it[0] in ("re", "qu"):
+                q = fitz.Rect(it[1]).quad if it[0] == "re" else it[1]
+                pts = [to_view(M, v) for v in (q.ul, q.ur, q.lr, q.ll, q.ul)]
+                segs = list(zip(pts, pts[1:]))
+                if all(abs(a[0] - b[0]) <= 0.5 or abs(a[1] - b[1]) <= 0.5 for a, b in segs):
+                    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                    rects.append((min(xs), min(ys), max(xs), max(ys)))
+            else:
+                continue
+            for a, b in segs:
+                if abs(a[1] - b[1]) <= 0.5 and abs(a[0] - b[0]) >= 0.5 * W:
+                    hs.append((min(a[0], b[0]), max(a[0], b[0]), (a[1] + b[1]) / 2))
+                elif abs(a[0] - b[0]) <= 0.5 and abs(a[1] - b[1]) >= 0.5 * H:
+                    vs.append((min(a[1], b[1]), max(a[1], b[1]), (a[0] + b[0]) / 2))
+    hs, vs = _merge_collinear(hs)[:16], _merge_collinear(vs)[:16]
+    t = cfg.border_corner_tol
+    for top in hs:
+        for bot in hs:
+            if bot[2] - top[2] < cfg.border_min_fraction * H:
+                continue
+            for left in vs:
+                for right in vs:
+                    x0, x1, y0, y1 = left[2], right[2], top[2], bot[2]
+                    if x1 - x0 < cfg.border_min_fraction * W:
+                        continue
+                    if all(l[0] <= a + t and l[1] >= b - t for l, a, b in
+                           ((top, x0, x1), (bot, x0, x1), (left, y0, y1), (right, y0, y1))):
+                        rects.append((x0, y0, x1, y1))
+    frames = []
+    for r in rects:
+        w, h = r[2] - r[0], r[3] - r[1]
+        if w < cfg.border_min_fraction * W or h < cfg.border_min_fraction * H or w > 1.15 * W or h > 1.15 * H:
+            continue
+        ix = max(0.0, min(r[2], W) - max(r[0], 0.0))
+        iy = max(0.0, min(r[3], H) - max(r[1], 0.0))
+        if ix * iy < 0.5 * W * H:
+            continue
+        if text_centres and sum(1 for c in text_centres if r[0] <= c[0] <= r[2] and r[1] <= c[1] <= r[3]) \
+                < 0.75 * len(text_centres):
+            continue
+        if any(all(abs(r[k] - f[k]) <= 1.0 for k in range(4)) for f in frames):
+            continue
+        frames.append(r)
+    frames.sort(key=lambda r: -(r[2] - r[0]) * (r[3] - r[1]))
+    return {"frames": [tuple(rnd(v) for v in f) for f in frames], "inner": frames[-1] if frames else None}
+
+
+def _outside(p, r, tol: float) -> bool:
+    return p[0] < r[0] - tol or p[0] > r[2] + tol or p[1] < r[1] - tol or p[1] > r[3] + tol
+
+
+def _inside(p, r, tol: float) -> bool:
+    return r[0] + tol < p[0] < r[2] - tol and r[1] + tol < p[1] < r[3] - tol
+
+
+def is_border_segment(a, b, border: Optional[dict], tol: float = 1.0) -> bool:
+    """A frame edge, or a line in the margin band outside the drawing area (zone ticks)."""
+    if not border or not border.get("frames"):
+        return False
+    for x0, y0, x1, y1 in border["frames"]:
+        for e0, e1 in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x0, y1), (x1, y1)), ((x0, y0), (x0, y1))):
+            if point_segment_distance(a, e0, e1)[0] <= tol and point_segment_distance(b, e0, e1)[0] <= tol:
+                return True
+    inner = border["inner"]
+    mid = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+    return _outside(mid, inner, tol) and not _inside(a, inner, tol) and not _inside(b, inner, tol)
+
+
+def is_border_text(t: dict, border: Optional[dict], tol: float = 0.5) -> bool:
+    """Zone numbers / letters printed in the margin band outside the drawing area."""
+    return bool(border and border.get("inner")) and _outside(t["center"], border["inner"], tol)
+
+
+def auto_wire_width(page, drawings: Optional[list] = None, border: Optional[dict] = None) -> Optional[float]:
+    """Stroke width carrying the largest total length of long, solid, black lines (border excluded)."""
     M = page.rotation_matrix
     totals: Dict[float, float] = defaultdict(float)
     for d in (drawings if drawings is not None else page.get_drawings()):
@@ -442,18 +559,22 @@ def auto_wire_width(page, drawings: Optional[list] = None) -> Optional[float]:
             continue
         for it in d.get("items", []):
             if it[0] == "l":
-                L = dist(to_view(M, it[1]), to_view(M, it[2]))
-                if L >= 8.0:
-                    totals[w] += L
+                a, b = to_view(M, it[1]), to_view(M, it[2])
+                if dist(a, b) >= 8.0 and not is_border_segment(a, b, border):
+                    totals[w] += dist(a, b)
     return max(totals.items(), key=lambda kv: kv[1])[0] if totals else None
 
 
-def extract_vectors(page, cfg: V6Config) -> dict:
-    """Stroked line pieces (all widths) and small circles in the displayed frame."""
+def extract_vectors(page, cfg: V6Config, drawings: Optional[list] = None, border: Optional[dict] = None) -> dict:
+    """Stroked line pieces (all widths) and small circles in the displayed frame.
+
+    Sheet-border lines are kept for the ownership geometry check but flagged, so they are
+    never used as stations.
+    """
     M = page.rotation_matrix
-    drawings = page.get_drawings()
+    drawings = page.get_drawings() if drawings is None else drawings
     if cfg.wire_width is None and cfg.wire_width_auto:
-        cfg = V6Config(**{**cfg.to_dict(), "wire_width": auto_wire_width(page, drawings)})
+        cfg = V6Config(**{**cfg.to_dict(), "wire_width": auto_wire_width(page, drawings, border)})
     lines, unrot_pts, small_circles = [], [], []
     for di, d in enumerate(drawings):
         dtype = d.get("type") or ""
@@ -493,7 +614,8 @@ def extract_vectors(page, cfg: V6Config) -> dict:
                     continue
                 is_wire = (cfg.wire_width is not None and not dashed
                            and abs(width - cfg.wire_width) <= cfg.wire_width_tol)
-                lines.append({"p0": va, "p1": vb, "width": width, "dashed": dashed, "is_wire": is_wire})
+                lines.append({"p0": va, "p1": vb, "width": width, "dashed": dashed, "is_wire": is_wire,
+                              "border": is_border_segment(va, vb, border)})
                 unrot_pts.append(((float(a.x), float(a.y)), (float(b.x), float(b.y))))
     return {"lines": lines, "unrotated_lines": unrot_pts, "small_circles": small_circles}
 
@@ -816,7 +938,7 @@ def detect_stations(seg: dict, vec: dict, line_index: GridIndex, circle_index: G
             found.append(s)
     for li in line_index.query(*box):
         o = vec["lines"][li]
-        if o["is_wire"] or o["dashed"] or o["width"] < cfg.station_line_min_width:
+        if o["is_wire"] or o["dashed"] or o["border"] or o["width"] < cfg.station_line_min_width:
             continue
         a, b = o["p0"], o["p1"]
         if dist(a, b) > cfg.station_line_max_length:
@@ -1856,9 +1978,24 @@ def process_pdf(tag: str, pdf_path: str, seg_path: str, page, cfg: V6Config) -> 
         for i, s in enumerate(segs):
             s["index"] = i
     sha = sha256_file(pdf_path)
-    texts = extract_texts(page, cfg)
-    vec = extract_vectors(page, cfg)
+    all_texts = extract_texts(page, cfg)
+    drawings = page.get_drawings()
+    border = detect_sheet_border(page, drawings, [tuple(t["center"]) for t in all_texts], cfg)
+    texts = [t for t in all_texts if not is_border_text(t, border)]   # zone markers never label wires
+    for i, t in enumerate(texts):
+        t["id"] = f"T{i:05d}"
+    vec = extract_vectors(page, cfg, drawings, border)
     ownership = validate_ownership(tag, data, segs, pdf_path, sha, page, vec, cfg)
+    segs_all = segs
+    ignored = []
+    for s in segs_all:                    # safety net for segment JSON that still contains the frame
+        poly = s["polyline"]
+        L = polyline_length(poly)
+        on_border = sum(dist(a, b) for a, b in zip(poly, poly[1:]) if is_border_segment(a, b, border))
+        if L > 0 and on_border >= cfg.border_segment_fraction * L:
+            s["ignored"] = "sheet border / frame geometry, not a harness wire"
+            ignored.append({"segment_index": s["index"], "segment_key": s["orig_key"], "reason": s["ignored"]})
+    segs = [s for s in segs_all if not s.get("ignored")]
     groups = group_nodes(segs)
     # straight wire pieces (stations divide label spans)
     lidx, cidx = GridIndex(25.0), GridIndex(25.0)
@@ -1880,7 +2017,12 @@ def process_pdf(tag: str, pdf_path: str, seg_path: str, page, cfg: V6Config) -> 
     tindex = GridIndex(20.0)
     for i, t in enumerate(texts):
         tindex.insert(i, *t["bbox"])
+    border_report = {"frames": [list(f) for f in border["frames"]],
+                     "drawing_area": [rnd(v) for v in border["inner"]] if border["inner"] else None,
+                     "margin_texts_excluded": len(all_texts) - len(texts),
+                     "ignored_segments": ignored}
     return {"tag": tag, "pdf": pdf_path, "sha256": sha, "segments_path": seg_path, "data": data, "segs": segs,
+            "segs_all": segs_all, "border": border_report,
             "groups": groups, "texts": texts, "tindex": tindex, "pieces": pieces, "assignments": assignments,
             "text_diag": text_diag, "terminal_diag": term_diag, "ownership": ownership}
 
@@ -1889,7 +2031,10 @@ def corrected_json(res: dict, cfg: V6Config) -> dict:
     """Original JSON preserved; corrected / rebuilt fields added next to it."""
     data = copy.deepcopy(res["data"])
     for i, raw in enumerate(data["segments"]):
-        s = res["segs"][i]                          # normalized in the same order as the JSON
+        s = res["segs_all"][i]                      # normalized in the same order as the JSON
+        if s.get("ignored"):
+            raw["ignored_reason"] = s["ignored"]
+            continue
         conf_labels = [a["confidence"] for a in s["assignments"]]
         raw["segment_index"] = s["index"]
         raw["original_segment_key"] = s["orig_key"]
@@ -1918,7 +2063,8 @@ def corrected_json(res: dict, cfg: V6Config) -> dict:
             "end_identity": s["end"].get("name_confidence"),
         }
     data["v6"] = {"script": os.path.basename(__file__), "version": VERSION, "config": cfg.to_dict(),
-                  "ownership_check": res["ownership"], "text_assignment": res["text_diag"],
+                  "ownership_check": res["ownership"], "sheet_border": res["border"],
+                  "text_assignment": res["text_diag"],
                   "terminal_assignment": res["terminal_diag"]}
     return data
 
@@ -2080,6 +2226,11 @@ def draw_segment(img, poly, color, zoom: float, tag: Optional[str] = None, thin:
 
 def render_marked(page, zoom: float, marks: List[Tuple[List[Tuple[float, float]], tuple, str, bool]],
                   title: str, path: str) -> None:
+    """Draw the marks on the page and put the legend in a strip BELOW the drawing.
+
+    The strip never hides drawing content (important for sheets without a border, where
+    the harness reaches the page corners); drawing pixels keep the mapping point * zoom.
+    """
     img = render_page_bgr(page, zoom)
     for poly, color, tag, thin in sorted(marks, key=lambda m: m[3], reverse=True):
         draw_segment(img, poly, color, zoom, tag, thin)
@@ -2087,16 +2238,15 @@ def render_marked(page, zoom: float, marks: List[Tuple[List[Tuple[float, float]]
               ("Yellow: annotation / extraction review", COLORS["review"]),
               ("Red: entire branch removed from PDF A", COLORS["removed"]),
               ("Green: entire branch added in PDF B", COLORS["added"])]
-    x0, y0 = 10, 10
-    cv2.rectangle(img, (x0, y0), (x0 + 430, y0 + 28 + 22 * len(legend)), (255, 255, 255), -1)
-    cv2.rectangle(img, (x0, y0), (x0 + 430, y0 + 28 + 22 * len(legend)), (60, 60, 60), 1)
-    cv2.putText(img, title, (x0 + 8, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
+    h = 46 + 26 * len(legend)
+    strip = np.full((h, img.shape[1], 3), 255, dtype=np.uint8)
+    cv2.line(strip, (0, 1), (img.shape[1] - 1, 1), (120, 120, 120), 1)
+    cv2.putText(strip, title, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 1, cv2.LINE_AA)
     for k, (txt, col) in enumerate(legend):
-        y = y0 + 42 + 22 * k
-        cv2.line(img, (x0 + 10, y - 5), (x0 + 40, y - 5), (255, 255, 255), 7)
-        cv2.line(img, (x0 + 10, y - 5), (x0 + 40, y - 5), col, 4)
-        cv2.putText(img, txt, (x0 + 50, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 1, cv2.LINE_AA)
-    if not cv2.imwrite(path, img):
+        y = 58 + 26 * k
+        cv2.line(strip, (12, y - 6), (46, y - 6), col, 5)
+        cv2.putText(strip, txt, (58, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 0), 1, cv2.LINE_AA)
+    if not cv2.imwrite(path, np.vstack([img, strip])):
         raise RuntimeError(f"could not write image {path}")
 
 
@@ -2249,6 +2399,10 @@ def main(argv=None) -> int:
             "junctions": cmp_res["junctions"]["summary"],
             "numeric_labels_assigned_a": A["text_diag"]["assigned"],
             "numeric_labels_assigned_b": B["text_diag"]["assigned"],
+            "sheet_frames_a": len(A["border"]["frames"]),
+            "sheet_frames_b": len(B["border"]["frames"]),
+            "ignored_border_segments_a": len(A["border"]["ignored_segments"]),
+            "ignored_border_segments_b": len(B["border"]["ignored_segments"]),
         }
         result = {
             "summary": summary,
@@ -2265,6 +2419,7 @@ def main(argv=None) -> int:
                 "segments_a": os.path.abspath(args.segments_a), "segments_b": os.path.abspath(args.segments_b),
                 "page": args.page, "zoom": args.zoom,
                 "ownership_check_a": A["ownership"], "ownership_check_b": B["ownership"],
+                "sheet_border_a": A["border"], "sheet_border_b": B["border"],
             },
             "diagnostics": {
                 "text_assignment_a": A["text_diag"], "text_assignment_b": B["text_diag"],
@@ -2294,6 +2449,9 @@ def main(argv=None) -> int:
           f"{summary['numeric_labels_assigned_a']} numeric labels owned, check: {A['ownership']['method']})")
     print(f"  PDF B          : {args.pdf_b}  ({summary['segments_b']} segments, "
           f"{summary['numeric_labels_assigned_b']} numeric labels owned, check: {B['ownership']['method']})")
+    print(f"  Sheet border   : A {summary['sheet_frames_a']} frame(s), B {summary['sheet_frames_b']} frame(s); "
+          f"margin texts excluded A {A['border']['margin_texts_excluded']}, B {B['border']['margin_texts_excluded']}; "
+          f"border segments ignored A {summary['ignored_border_segments_a']}, B {summary['ignored_border_segments_b']}")
     print(f"  Same exact     : {summary['same_exact']}")
     print(f"  Same probable  : {summary['same_probable']}")
     print(f"  Changed        : {summary['changed']}")

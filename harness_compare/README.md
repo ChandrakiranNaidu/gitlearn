@@ -50,6 +50,25 @@ that belongs to another PDF or page. JSON files from another engine (no fingerpr
 geometrically instead: their polylines must lie on the PDF's vectors, and an unrotated or
 y-up coordinate frame is detected and converted automatically.
 
+## Sheet borders, title blocks and cropped sheets
+
+Two versions of a drawing may differ only in presentation. One may have the sheet frame,
+zone markers and title block while the other has none, or one may be cropped. All scripts
+treat this as "no difference":
+
+* The drawing frame is detected as a large axis-aligned rectangle (one path or four lines,
+  any stroke width, roughly page-sized, enclosing most of the text). Frame edges and lines in
+  the margin band outside it (zone ticks) are never wires. Margin text (zone numbers and
+  letters) is never a wire number or terminal name. `--wire-width auto` ignores border lines.
+* Wire-width components with no junction dot or circle, only horizontal and vertical lines,
+  and either closed cells or all free ends resting on the frame (title block, revision
+  table) are dropped from the harness graph.
+* Text is read as whole words. A name cut by the crop box is read in full, and text of
+  other sheets placed off the page is ignored.
+* Script 3 also sets aside segments of a foreign segment JSON that lie on the frame or in
+  the margin. They are listed under `inputs.sheet_border_a/b.ignored_segments`.
+* The legend is drawn in a strip below the page image, never over the drawing.
+
 ## Drawing conventions the rules rely on
 
 * Harness wires are stroked line vectors of one stroke width (0.539 pt in the supplied drawing).
@@ -123,6 +142,8 @@ and 3 end to end. It checks:
 * the 32 / 41 bent branch is resolved correctly
 * reversed traversal and a shifted drawing do not create changes
 * 51 -> 57 between two junctions whose IDs both change is reported as a change, not removed + added
+* a copy with a wire-width frame, zone ticks and numbers, a title-block table, and a crop cutting a
+  terminal name produces no findings at all
 
 It also covers compilation, the regexes, the side rules, global text and terminal ownership,
 output files, and the absence of HTML markup in the sources.
