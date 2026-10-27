@@ -42,8 +42,9 @@ python junction_depth1_ids.py --pdf old.pdf --out junctions_old
 ```
 
 Common options: `--page` (zero-based, default 0), `--zoom` (default 3.0),
-`--wire-width` (default `0.539`, or `auto`), `--label-max-side` (default 10.5 pt),
-`--projection-margin` (default 2.0 pt), `--mark-same` (Script 3: also draw unchanged segments).
+`--mark-same` (Script 3: also draw unchanged segments). Calibration overrides (all default to
+`auto`, measured per PDF): `--wire-width`, `--label-max-side`, `--label-side-h {below,above,on-wire}`,
+`--label-side-v {right,left,on-wire}`, and `--no-deskew`.
 
 A segment JSON written by Script 2 carries the SHA-256 of its PDF. Script 3 refuses a JSON
 that belongs to another PDF or page. JSON files from another engine (no fingerprint) are checked
@@ -69,19 +70,60 @@ treat this as "no difference":
   the margin. They are listed under `inputs.sheet_border_a/b.ignored_segments`.
 * The legend is drawn in a strip below the page image, never over the drawing.
 
+## Different drawing styles: per-PDF calibration
+
+No threshold is tied to the point sizes of one drawing. Every PDF is measured first, and each
+distance rule is the value tuned on the reference drawing multiplied by (unit of this PDF / unit
+of the reference drawing). The two PDFs of a comparison are calibrated independently, so A and B
+may differ in style.
+
+| Variation | How it is measured / handled |
+|---|---|
+| Page scale | All distances are in the PDF's own units. The layout unit (spacing scale) is the median of three independent cues: text size, label placement distance, and pen style (wire pen and dot size combined). So one oddly styled feature, or a fine pen together with small dots, does not distort it. |
+| Wire stroke width | The wire pen is the stroke width whose lines carry the numeric labels and meet at junction dots. Frames, zone ticks, tables and title blocks never meet at junction dots. Extra pens (for example bundles drawn thicker) are accepted when they carry labels in the wire-number font. Script 3 uses the pen of the PDF lines under the segment polylines. |
+| Text bounding-box size / font | The text unit is the median font size of the numbers sitting next to wires. Zone numbers, table entries and notes in other fonts are ignored, and font box padding does not matter. |
+| Text-to-wire distance and side | Measured. Per orientation the label side is the majority side: below / above / on the wire for horizontal wires, right / left / on the wire for vertical ones. A label may be up to 2.4 x the typical label distance away. |
+| Text orientation angle | The angle tolerance follows how far the texts deviate from the axes (99th percentile + 3 deg, between 12 and 25 deg). Vertical text may read either way, and "above / below" checks for names and captions use the text's own reading frame. |
+| Circle diameter | The junction-dot size is the median outer diameter of filled dots where 3+ wires meet. Dot and element (large circle) limits are relative to it. |
+| Vector endpoint positions | The endpoint tolerance comes from the natural break in the gaps between wire ends (capped). Facing free ends with only text between them are bridged. |
+| Vector segmentation | Collinear overlapping, split or duplicated pieces are merged, and vertices where the route does not bend are dropped. |
+| Drawing rotated off the page axes | The dominant line angle is detected, the analysis runs in a straightened frame, and all outputs are in page coordinates. |
+| Leaders vs hatching | A non-wire line counts (leader, tick, symbol) when its pen is at least 4 % of the layout unit or it is long. On the reference drawing this sits midway between hatching (2.5 %) and leaders (6 %), whatever pen the wires use. Closed outlines are never leaders. |
+| Terminal names | Ranked by distance, with soft costs for text below the terminal or off its line in the text's own reading frame. There is no hard cut-off, so nearby names do not flip on small shifts. One text names one terminal. |
+| Several sheets on one page | The wire-number font is taken from the numbers next to wires, so the zone numbers of other sheets do not set the text unit. |
+
+The measured profile is printed and stored: `profile` in the segment JSON, and
+`inputs.calibration_a/b` plus `config_a/b` in `segment_comparison_v6.json`. Any measured value
+can be fixed from the command line (see Common options).
+
+Limits:
+
+* **Wire pen:** wires must use a pen that differs from leader / symbol pens by more than about
+  6 %. Otherwise a leader is indistinguishable from a wire.
+* **Labels near the distance limit:** a label close to the maximum allowed distance can be
+  `review` in one drawing and `same` in another whose labels sit generally further from
+  their wires.
+* **Stacked extremes:** in random stress tests that combine several extremes at once, 112 of
+  114 behaved. The two misses were wire ends displaced by about two pen widths on a 0.4 x
+  scaled sheet, and a label crammed 1.5 pt below a neighbouring wire with a 25 % smaller font
+  on top. Both produced extra findings (false alarms) rather than hiding the planted changes.
+
 ## Drawing conventions the rules rely on
 
 * Harness wires are stroked line vectors of one stroke width (0.539 pt in the supplied drawing).
 * Junction = small filled dot where 3+ wires leave; large circles (H8P802, P8Q601, ...) are
   circular elements; boxes / ground symbols at wire ends are terminals.
 * Horizontal wire: its number is horizontal text **below** the wire (larger y), close to it,
-  and its centre projects onto that straight piece.
-* Vertical wire: its number is text rotated about 90 degrees on the **right** of the wire.
+  and its centre projects onto that straight piece (the side is measured per PDF; below is the
+  default when a PDF has too few labels to tell).
+* Vertical wire: its number is text rotated about 90 degrees on the **right** of the wire
+  (likewise measured; right is the default).
 * Angled pieces never claim a number; the neighbouring horizontal / vertical piece owns it.
 * Annotations (CLAMP, MARKER, ROUTE, LABEL, BRAID, SUPPORT) hang on leader lines and are
   treated as review-only content.
 
-All of these are applied in the displayed page frame (page `/Rotate` taken into account).
+All of these are applied in the displayed page frame (page `/Rotate` taken into account),
+straightened when the whole drawing is rotated off the page axes.
 
 ## How Script 3 decides
 
@@ -144,9 +186,31 @@ and 3 end to end. It checks:
 * 51 -> 57 between two junctions whose IDs both change is reported as a change, not removed + added
 * a copy with a wire-width frame, zone ticks and numbers, a title-block table, and a crop cutting a
   terminal name produces no findings at all
+* presentation variants (scaled + skewed with a heavier pen, larger font, bigger dots and split
+  wires; turned 90 deg with a lighter pen and smaller font) give no findings against the
+  original, and the same findings as the original pair
 
 It also covers compilation, the regexes, the side rules, global text and terminal ownership,
 output files, and the absence of HTML markup in the sources.
+
+### Checking your own drawings against style variations
+
+```bash
+python tests/run_variations.py --pdf-a old.pdf --pdf-b new.pdf --out variation_runs
+```
+
+This redraws both PDFs in 18 presentation variants (`tests/make_variation.py`):
+
+* page scale 0.5 / 1.8, wire pen x2 / x0.5, and font x0.7 / x1.4;
+* labels moved further out, mirrored to the other side, rotated a few degrees, or read top-down;
+* dots x2 and circles x0.7;
+* wire ends moved, and wires split into overlapping or duplicated pieces;
+* skewed 7 deg, turned 90 deg, and a combination of these.
+
+For each variant it checks that A versus V(A) reports nothing and that A versus V(B) reports
+the same findings as A versus B. On the supplied drawing all 18 variants behave. Under the
+label-moving variants, label 87 (planted 8 pt out of range) sits within that drawing's own
+label range and is reported `NOTE`, as described in the script.
 
 On the supplied drawing (`6866VB`), a modified copy with eight known edits was used during
 development. The edits were: 459 -> 460, two branches deleted, one branch and junction added,
@@ -154,4 +218,5 @@ a CLAMP deleted, 1990VC-A renamed, label 87 moved out of range, and label 66 nud
 reported exactly those edits: 2 changed, 2 removed, 1 added, plus review items for the
 annotation, the uncertain label and the merged / split routes. All other segments came out
 same or probable-same, including when the new drawing was shifted and scaled, and when a
-foreign-format JSON in unrotated coordinates was supplied.
+foreign-format JSON in unrotated coordinates was supplied. A page carrying 16 copies of the
+sheet at 0.774 scale (frames and zone numbers included) gave exactly 16 x those findings.

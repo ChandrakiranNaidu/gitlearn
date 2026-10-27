@@ -25,6 +25,9 @@ the CLAMP annotation deleted, 105 nudged by 1 pt.
 PDF C = PDF A plus a sheet border drawn with the WIRE stroke width (double frame, zone
 ticks, zone numbers, a title-block table hanging on the frame) and a crop box that cuts
 through the terminal name 7554VC-A.  A versus C must show no difference at all.
+Presentation variants V(A), V(B) (tests/make_variation.py): page scale, rotation, wire
+stroke width, font size, dot size, wire ends moved and wires split into pieces.  A versus
+V(A) must show no difference; A versus V(B) must give the same findings as A versus B.
 """
 
 from __future__ import annotations
@@ -224,6 +227,7 @@ def main() -> int:
 
     print("2. numeric regex")
     sys.path.insert(0, ROOT)
+    sys.path.insert(0, HERE)
     import compare_and_render_segments_v6 as v6  # noqa: E402
     for s, exp in (("52", True), ("52.0", True), ("35.8", True), ("EN6049-007", False), ("2M", False),
                    ("CLAMP", False), ("1 2", False), ("12a", False)):
@@ -343,6 +347,30 @@ def main() -> int:
         check(sm["same_exact"] == sm["segments_a"], "every segment is same exact")
         names = {ep.get("name") for s in sc["segments"] for ep in (s["start"], s["end"])}
         check("7554VC-A" in names, "terminal name cut by the crop box is read in full")
+    print("6. presentation variations (scale, rotation, pen width, font, dots, segmentation)")
+    from make_variation import make_variation  # noqa: E402
+    variants = {
+        "scaled + skewed": dict(scale=0.6, skew=4.0, wire_width=2.2, font=1.15, dot=1.8, segment=3,
+                                endpoint_jitter=0.5, seed=3),
+        "turned 90 deg": dict(scale=1.5, skew=90.0, wire_width=0.45, font=0.85, segment=2, seed=5),
+    }
+    for vname, opts in variants.items():
+        for tag, src, exp in (("a", pa, (0, 0, 0, 0)), ("b", pb, (2, 1, 0, 0))):
+            vp = os.path.join(tmp, f"var_{vname.split()[0]}_{tag}.pdf")
+            make_variation(src, vp, **opts)
+            seg_v, out_v = vp[:-4] + "_seg", vp[:-4] + "_cmp"
+            r2 = run([os.path.join(ROOT, "build_logical_segments.py"), "--pdf-a", pa, "--pdf-b", vp, "--out", seg_v,
+                      "--no-images"])
+            r3 = run([os.path.join(ROOT, "compare_and_render_segments_v6.py"), "--pdf-a", pa, "--pdf-b", vp,
+                      "--segments-a", os.path.join(seg_v, "pdf_a_segments.json"),
+                      "--segments-b", os.path.join(seg_v, "pdf_b_segments.json"), "--out", out_v, "--zoom", "1"]) \
+                if r2.returncode == 0 else r2
+            got = None
+            if r3.returncode == 0:
+                sm = json.load(open(os.path.join(out_v, "segment_comparison_v6.json")))["summary"]
+                got = (sm["changed"], sm["review"], sm["entire_branches_removed"], sm["entire_branches_added"])
+            what = "no difference" if tag == "a" else "same findings as A vs B"
+            check(got == exp, f"{vname}: A vs V({tag.upper()}) gives {what} (changed/review/removed/added {got})")
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) FAILED (work dir {tmp})")

@@ -69,7 +69,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -87,12 +87,35 @@ VERSION = "v6"
 # ===========================================================================
 
 
+# Values measured on the reference drawing the thresholds were tuned on.  Every distance
+# below is the reference value; calibrate_pdf() measures each PDF and derive_pdf_config()
+# rescales the distances to that PDF's own units.
+REF_TEXT_UNIT = 5.39      # median font size of numeric labels (pt)
+REF_WIRE_UNIT = 0.539     # harness wire stroke width (pt)
+REF_DOT_UNIT = 2.16       # junction dot outer diameter (pt)
+REF_LABEL_DISTANCE = 5.04 # median distance of a wire number's centre from its wire (pt)
+
+
 @dataclass
 class V6Config:
-    # Wire stroke width (only used to keep wire vectors out of the station list)
-    wire_width: Optional[float] = 0.539
-    wire_width_auto: bool = False
+    # Calibration (None = measured per PDF)
+    wire_width: Optional[float] = None      # explicit wire pen; else the pen of the lines under the segments
+    wire_width_auto: bool = True
     wire_width_tol: float = 0.03
+    label_max_side_override: Optional[float] = None
+    side_h: Optional[int] = None            # +1 labels below horizontal wires, -1 above, 0 on the wire
+    side_v: Optional[int] = None            # +1 labels right of vertical wires, -1 left, 0 on the wire
+    deskew: bool = True
+    text_unit: float = REF_TEXT_UNIT
+    wire_unit: float = REF_WIRE_UNIT
+    dot_unit: float = REF_DOT_UNIT
+    layout_unit: float = REF_TEXT_UNIT
+    inline_max_side: float = 3.2
+    significant_min_width: float = 0.22     # non-wire lines thinner AND shorter are texture (hatching)
+    significant_min_length: float = 3.2
+    end_margin: float = 1.0                 # stations closer than this to a route end are ignored
+    group_tol: float = 1.5                  # segment ends this close share one node
+    missing_position_window: float = 25.0
     # Orientation tolerances
     axis_tol_deg: float = 8.0           # straight wire piece horizontal / vertical
     text_axis_tol_deg: float = 12.0     # text horizontal / vertical
@@ -100,14 +123,13 @@ class V6Config:
     # Strict numeric label placement
     label_min_side: float = 0.4         # label centre at least this far on the required side
     label_max_side: float = 10.5        # ... and at most this far (small configured maximum)
-    label_overlap_tol: float = 0.6      # text box may not cross the wire by more than this
+    label_overlap_tol: float = 1.9      # text box may not cross the wire by more than this
     projection_margin: float = 2.0      # centre may project this far beyond a piece end
     weight_perpendicular: float = 1.0
     weight_centre: float = 0.5
     label_slot_gap: float = 0.5         # two labels on one piece must not overlap along it
     # Stations (points that divide label spans on a straight run)
     station_tol: float = 0.8
-    station_line_min_width: float = 0.25
     station_line_max_length: float = 40.0
     station_merge_dist: float = 2.0
     small_circle_max_diameter: float = 3.0
@@ -115,7 +137,9 @@ class V6Config:
     terminal_text_radius: float = 30.0
     element_text_radius: float = 22.0
     terminal_below_penalty: float = 6.0
+    terminal_below_slack: float = 3.0
     terminal_inward_penalty: float = 8.0
+    terminal_align_weight: float = 0.25     # per pt off the terminal's line (reading frame)
     terminal_min_confidence: float = 0.35
     # Extraction-uncertainty radius (a value visible near the other segment)
     uncertain_text_radius: float = 15.0
@@ -349,14 +373,14 @@ def to_view(M, p) -> Tuple[float, float]:
     return (M.a * x + M.c * y + M.e, M.b * x + M.d * y + M.f)
 
 
-def extract_texts(page, cfg: V6Config) -> List[dict]:
-    """All text objects (word groups) in the displayed frame, each with a unique ID."""
-    M = page.rotation_matrix
+def extract_texts(page, cfg: V6Config, M=None, view=None) -> List[dict]:
+    """All text objects (word groups) in the analysis frame, each with a unique ID."""
+    M = page.rotation_matrix if M is None else M
     # read without clipping and keep whole words that are at least partly visible, so a name
     # cut by the crop box is not shortened, and other sheets placed off the page are ignored
     raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES,
                         clip=fitz.INFINITE_RECT())
-    visible = page.rect
+    visible = page.rect if view is None else view
     tol = math.sin(math.radians(cfg.text_axis_tol_deg))
     out = []
     for block in raw.get("blocks", []):
@@ -443,11 +467,11 @@ def _bezier(p0, p1, p2, p3, n=6):
     return pts
 
 
-def _merge_collinear(lines):
+def _merge_collinear(lines, ctol: float = 0.6, gap: float = 2.0):
     out = []
     for lo, hi, c in sorted(lines, key=lambda l: (l[2], l[0])):
         for m in out:
-            if abs(m[2] - c) <= 0.6 and lo <= m[1] + 2.0 and hi >= m[0] - 2.0:
+            if abs(m[2] - c) <= ctol and lo <= m[1] + gap and hi >= m[0] - gap:
                 m[0], m[1] = min(m[0], lo), max(m[1], hi)
                 break
         else:
@@ -456,7 +480,8 @@ def _merge_collinear(lines):
     return [tuple(m) for m in out]
 
 
-def detect_sheet_border(page, drawings: list, text_centres: List[Tuple[float, float]], cfg: V6Config) -> dict:
+def detect_sheet_border(page, drawings: list, text_centres: List[Tuple[float, float]], cfg: V6Config,
+                        M=None) -> dict:
     """Drawing frame(s): large axis-aligned rectangles framing the sheet (any stroke width).
 
     Same rule as Script 1: one rectangle path or four lines, >= border_min_fraction of the
@@ -466,7 +491,9 @@ def detect_sheet_border(page, drawings: list, text_centres: List[Tuple[float, fl
     W, H = page.rect.width, page.rect.height
     if not cfg.border_detection:
         return {"frames": [], "inner": None}
-    M = page.rotation_matrix
+    M = page.rotation_matrix if M is None else M
+    U = cfg.layout_unit
+    ax_tol = max(0.5 * U / REF_TEXT_UNIT, 0.05)
     rects, hs, vs = [], [], []
     for d in drawings:
         if "s" not in (d.get("type") or "") or _is_white(d.get("color")):
@@ -478,17 +505,17 @@ def detect_sheet_border(page, drawings: list, text_centres: List[Tuple[float, fl
                 q = fitz.Rect(it[1]).quad if it[0] == "re" else it[1]
                 pts = [to_view(M, v) for v in (q.ul, q.ur, q.lr, q.ll, q.ul)]
                 segs = list(zip(pts, pts[1:]))
-                if all(abs(a[0] - b[0]) <= 0.5 or abs(a[1] - b[1]) <= 0.5 for a, b in segs):
+                if all(abs(a[0] - b[0]) <= ax_tol or abs(a[1] - b[1]) <= ax_tol for a, b in segs):
                     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
                     rects.append((min(xs), min(ys), max(xs), max(ys)))
             else:
                 continue
             for a, b in segs:
-                if abs(a[1] - b[1]) <= 0.5 and abs(a[0] - b[0]) >= 0.5 * W:
+                if abs(a[1] - b[1]) <= ax_tol and abs(a[0] - b[0]) >= 0.5 * W:
                     hs.append((min(a[0], b[0]), max(a[0], b[0]), (a[1] + b[1]) / 2))
-                elif abs(a[0] - b[0]) <= 0.5 and abs(a[1] - b[1]) >= 0.5 * H:
+                elif abs(a[0] - b[0]) <= ax_tol and abs(a[1] - b[1]) >= 0.5 * H:
                     vs.append((min(a[1], b[1]), max(a[1], b[1]), (a[0] + b[0]) / 2))
-    hs, vs = _merge_collinear(hs)[:16], _merge_collinear(vs)[:16]
+    hs, vs = _merge_collinear(hs, 0.11 * U, 0.37 * U)[:16], _merge_collinear(vs, 0.11 * U, 0.37 * U)[:16]
     t = cfg.border_corner_tol
     for top in hs:
         for bot in hs:
@@ -514,11 +541,12 @@ def detect_sheet_border(page, drawings: list, text_centres: List[Tuple[float, fl
         if text_centres and sum(1 for c in text_centres if r[0] <= c[0] <= r[2] and r[1] <= c[1] <= r[3]) \
                 < 0.75 * len(text_centres):
             continue
-        if any(all(abs(r[k] - f[k]) <= 1.0 for k in range(4)) for f in frames):
+        if any(all(abs(r[k] - f[k]) <= 0.19 * U for k in range(4)) for f in frames):
             continue
         frames.append(r)
     frames.sort(key=lambda r: -(r[2] - r[0]) * (r[3] - r[1]))
-    return {"frames": [tuple(rnd(v) for v in f) for f in frames], "inner": frames[-1] if frames else None}
+    return {"frames": [tuple(rnd(v) for v in f) for f in frames], "inner": frames[-1] if frames else None,
+            "band_tol": max(1.86 * cfg.wire_unit, 0.19 * U), "text_tol": 0.093 * U}
 
 
 def _outside(p, r, tol: float) -> bool:
@@ -529,10 +557,11 @@ def _inside(p, r, tol: float) -> bool:
     return r[0] + tol < p[0] < r[2] - tol and r[1] + tol < p[1] < r[3] - tol
 
 
-def is_border_segment(a, b, border: Optional[dict], tol: float = 1.0) -> bool:
+def is_border_segment(a, b, border: Optional[dict], tol: Optional[float] = None) -> bool:
     """A frame edge, or a line in the margin band outside the drawing area (zone ticks)."""
     if not border or not border.get("frames"):
         return False
+    tol = border.get("band_tol", 1.0) if tol is None else tol
     for x0, y0, x1, y1 in border["frames"]:
         for e0, e1 in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x0, y1), (x1, y1)), ((x0, y0), (x0, y1))):
             if point_segment_distance(a, e0, e1)[0] <= tol and point_segment_distance(b, e0, e1)[0] <= tol:
@@ -542,39 +571,23 @@ def is_border_segment(a, b, border: Optional[dict], tol: float = 1.0) -> bool:
     return _outside(mid, inner, tol) and not _inside(a, inner, tol) and not _inside(b, inner, tol)
 
 
-def is_border_text(t: dict, border: Optional[dict], tol: float = 0.5) -> bool:
+def is_border_text(t: dict, border: Optional[dict], tol: Optional[float] = None) -> bool:
     """Zone numbers / letters printed in the margin band outside the drawing area."""
-    return bool(border and border.get("inner")) and _outside(t["center"], border["inner"], tol)
+    if not (border and border.get("inner")):
+        return False
+    return _outside(t["center"], border["inner"], border.get("text_tol", 0.5) if tol is None else tol)
 
 
-def auto_wire_width(page, drawings: Optional[list] = None, border: Optional[dict] = None) -> Optional[float]:
-    """Stroke width carrying the largest total length of long, solid, black lines (border excluded)."""
-    M = page.rotation_matrix
-    totals: Dict[float, float] = defaultdict(float)
-    for d in (drawings if drawings is not None else page.get_drawings()):
-        if "s" not in (d.get("type") or "") or _is_dashed(d.get("dashes")) or _is_white(d.get("color")):
-            continue
-        w = round(float(d.get("width") or 0.0), 3)
-        if w < 0.2:
-            continue
-        for it in d.get("items", []):
-            if it[0] == "l":
-                a, b = to_view(M, it[1]), to_view(M, it[2])
-                if dist(a, b) >= 8.0 and not is_border_segment(a, b, border):
-                    totals[w] += dist(a, b)
-    return max(totals.items(), key=lambda kv: kv[1])[0] if totals else None
-
-
-def extract_vectors(page, cfg: V6Config, drawings: Optional[list] = None, border: Optional[dict] = None) -> dict:
-    """Stroked line pieces (all widths) and small circles in the displayed frame.
+def extract_vectors(page, cfg: V6Config, drawings: Optional[list] = None, border: Optional[dict] = None,
+                    M=None) -> dict:
+    """Stroked line pieces (all widths) and small circles in the analysis frame.
 
     Sheet-border lines are kept for the ownership geometry check but flagged, so they are
-    never used as stations.
+    never used as stations.  Wire / significance flags are set later by flag_lines() once
+    the wire pen of this PDF is known.
     """
-    M = page.rotation_matrix
+    M = page.rotation_matrix if M is None else M
     drawings = page.get_drawings() if drawings is None else drawings
-    if cfg.wire_width is None and cfg.wire_width_auto:
-        cfg = V6Config(**{**cfg.to_dict(), "wire_width": auto_wire_width(page, drawings, border)})
     lines, unrot_pts, small_circles = [], [], []
     for di, d in enumerate(drawings):
         dtype = d.get("type") or ""
@@ -592,7 +605,7 @@ def extract_vectors(page, cfg: V6Config, drawings: Optional[list] = None, border
                 samples += _bezier(*[to_view(M, q) for q in it[1:5]])
             xs, ys = [p[0] for p in samples], [p[1] for p in samples]
             w, h = max(xs) - min(xs), max(ys) - min(ys)
-            if 0.1 < w <= cfg.small_circle_max_diameter and h > 0.1 and abs(w / h - 1) < 0.2:
+            if 0.02 * cfg.text_unit < w <= 3.0 * cfg.text_unit and h > 0.02 * cfg.text_unit and abs(w / h - 1) < 0.2:
                 small_circles.append({"center": ((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2),
                                       "diameter": (w + h) / 2, "filled": filled})
             continue
@@ -612,12 +625,20 @@ def extract_vectors(page, cfg: V6Config, drawings: Optional[list] = None, border
                 va, vb = to_view(M, a), to_view(M, b)
                 if dist(va, vb) < 0.05:
                     continue
-                is_wire = (cfg.wire_width is not None and not dashed
-                           and abs(width - cfg.wire_width) <= cfg.wire_width_tol)
-                lines.append({"p0": va, "p1": vb, "width": width, "dashed": dashed, "is_wire": is_wire,
-                              "border": is_border_segment(va, vb, border)})
+                lines.append({"p0": va, "p1": vb, "width": width, "dashed": dashed, "is_wire": False,
+                              "significant": False, "border": is_border_segment(va, vb, border)})
                 unrot_pts.append(((float(a.x), float(a.y)), (float(b.x), float(b.y))))
     return {"lines": lines, "unrotated_lines": unrot_pts, "small_circles": small_circles}
+
+
+def flag_lines(vec: dict, cfg: V6Config) -> None:
+    """Wire pen lines, and significant non-wire lines (symbols, leaders, ticks) vs texture."""
+    for l in vec["lines"]:
+        l["is_wire"] = (cfg.wire_width is not None and not l["dashed"]
+                        and abs(l["width"] - cfg.wire_width) <= max(cfg.wire_width_tol, 0.06 * cfg.wire_width))
+        l["significant"] = (not l["dashed"] and not l["is_wire"] and not l["border"]
+                            and (l["width"] >= cfg.significant_min_width
+                                 or dist(l["p0"], l["p1"]) >= cfg.significant_min_length))
 
 
 def render_page_bgr(page, zoom: float) -> np.ndarray:
@@ -630,6 +651,235 @@ def render_page_bgr(page, zoom: float) -> np.ndarray:
     else:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     return img.copy()
+
+
+# ===========================================================================
+# Per-PDF calibration (orientation, units, label convention)
+# ===========================================================================
+
+def _solid_stroke(d: dict) -> bool:
+    return "s" in (d.get("type") or "") and not _is_dashed(d.get("dashes")) and not _is_white(d.get("color"))
+
+
+def dominant_axis_angle(drawings: list, M, page) -> Tuple[float, float]:
+    """Angle (deg) by which the drawing is rotated off the page axes, and its support (same
+    rule as Script 1: length-weighted histogram of long solid lines folded modulo 90 deg)."""
+    min_len = 0.01 * max(page.rect.width, page.rect.height)
+    hist = [0.0] * 180
+    samples = []
+    for d in drawings:
+        if not _solid_stroke(d):
+            continue
+        for it in d.get("items", []):
+            if it[0] != "l":
+                continue
+            a, b = to_view(M, it[1]), to_view(M, it[2])
+            L = dist(a, b)
+            if L < min_len:
+                continue
+            ang = ((math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) + 45.0) % 90.0) - 45.0
+            hist[min(179, int((ang + 45.0) * 2))] += L
+            samples.append((ang, L))
+    total = sum(hist)
+    if total <= 0:
+        return 0.0, 0.0
+    sm = [hist[i - 1] + hist[i] + hist[(i + 1) % 180] for i in range(180)]
+    peak = max(range(180), key=lambda i: sm[i])
+    centre = peak / 2.0 - 45.0 + 0.25
+    near = [(a if abs(a - centre) < 45 else a - math.copysign(90, a), L) for a, L in samples
+            if min(abs(a - centre), 90 - abs(a - centre)) <= 1.0]
+    theta = sum(a * L for a, L in near) / max(1e-9, sum(L for _, L in near)) if near else centre
+    support = sum(L for a, L in samples if min(abs(a - theta), 90 - abs(a - theta)) <= 2.0) / total
+    return theta, support
+
+
+def make_frame(page, cfg: V6Config, drawings: list) -> dict:
+    """Analysis frame = displayed page de-skewed about its centre (identity for normal drawings)."""
+    M0 = page.rotation_matrix
+    theta, support = dominant_axis_angle(drawings, M0, page) if cfg.deskew else (0.0, 0.0)
+    if abs(theta) < 0.3 or support < 0.5:
+        theta = 0.0
+    if theta == 0.0:
+        ident = fitz.Matrix(1, 0, 0, 1, 0, 0)
+        return {"theta": 0.0, "support": support, "M": M0, "R": ident, "Rinv": ident, "view": fitz.Rect(page.rect)}
+    cx, cy = page.rect.width / 2.0, page.rect.height / 2.0
+    c, s_ = math.cos(math.radians(theta)), math.sin(math.radians(theta))
+    R = fitz.Matrix(1, 0, 0, 1, -cx, -cy) * fitz.Matrix(c, -s_, s_, c, 0, 0) * fitz.Matrix(1, 0, 0, 1, cx, cy)
+    view = fitz.Rect()
+    for q in (page.rect.tl, page.rect.tr, page.rect.br, page.rect.bl):
+        view |= q * R
+    return {"theta": theta, "support": support, "M": M0 * R, "R": R, "Rinv": ~R, "view": view}
+
+
+def apply_matrix(T, p) -> Tuple[float, float]:
+    return (T.a * p[0] + T.c * p[1] + T.e, T.b * p[0] + T.d * p[1] + T.f)
+
+
+def wire_pen_from_segments(segs: List[dict], lines: List[dict], tol: float) -> Optional[float]:
+    """Stroke width of the PDF lines lying along the segment polylines (length weighted)."""
+    idx = GridIndex(25.0)
+    for i, l in enumerate(lines):
+        idx.insert(i, l["p0"][0], l["p0"][1], l["p1"][0], l["p1"][1])
+    by_width: Dict[float, float] = defaultdict(float)
+    for s in segs:
+        for a, b in zip(s["polyline"], s["polyline"][1:]):
+            if dist(a, b) < 4 * tol:
+                continue
+            m = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            u = unit((b[0] - a[0], b[1] - a[1]))
+            for li in idx.query(m[0] - tol, m[1] - tol, m[0] + tol, m[1] + tol):
+                l = lines[li]
+                if l["dashed"] or l["width"] <= 0:
+                    continue
+                v = unit((l["p1"][0] - l["p0"][0], l["p1"][1] - l["p0"][1]))
+                if abs(u[0] * v[0] + u[1] * v[1]) < 0.999:
+                    continue
+                if point_segment_distance(m, l["p0"], l["p1"])[0] <= tol:
+                    by_width[round(l["width"], 3)] += dist(l["p0"], l["p1"])
+    return max(by_width.items(), key=lambda kv: kv[1])[0] if by_width else None
+
+
+def label_text_unit(segs: List[dict], texts: List[dict]) -> Optional[float]:
+    """Median font size of the numeric texts sitting parallel next to the segment routes (the
+    wire numbers).  Zone numbers, table entries and notes in other fonts do not count."""
+    pcs = [(a, b) for s in segs for a, b in zip(s["polyline"], s["polyline"][1:]) if dist(a, b) > 0]
+    idx = GridIndex(30.0)
+    for i, (a, b) in enumerate(pcs):
+        idx.insert(i, a[0], a[1], b[0], b[1])
+    fonts = []
+    for t in texts:
+        f = t.get("font_size", 0)
+        if not t["is_numeric"] or f <= 0 or t["orientation"] not in ("horizontal", "vertical"):
+            continue
+        cx, cy = t["center"]
+        for i in idx.query(cx - 3 * f, cy - 3 * f, cx + 3 * f, cy + 3 * f):
+            a, b = pcs[i]
+            dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+            if t["orientation"] == "horizontal" and dy <= 0.1 * dx:
+                lo, hi, along, perp = min(a[0], b[0]), max(a[0], b[0]), cx, abs(cy - (a[1] + b[1]) / 2)
+            elif t["orientation"] == "vertical" and dx <= 0.1 * dy:
+                lo, hi, along, perp = min(a[1], b[1]), max(a[1], b[1]), cy, abs(cx - (a[0] + b[0]) / 2)
+            else:
+                continue
+            if lo - 0.4 * f <= along <= hi + 0.4 * f and perp <= 3 * f:
+                fonts.append(f)
+                break
+    fonts.sort()
+    return fonts[len(fonts) // 2] if len(fonts) >= 5 else None
+
+
+def calibrate_labels(segs: List[dict], texts: List[dict], text_unit: float, axis_tol_deg: float) -> dict:
+    """Label side per wire orientation and typical distance, measured against the segment routes
+    (same rule as Script 1: majority side of the nearest parallel piece)."""
+    U = text_unit
+    tn = math.tan(math.radians(axis_tol_deg))
+    pcs = [(a, b) for s in segs for a, b in zip(s["polyline"], s["polyline"][1:]) if dist(a, b) > 0]
+    idx = GridIndex(30.0)
+    for i, (a, b) in enumerate(pcs):
+        idx.insert(i, a[0], a[1], b[0], b[1])
+    raws: Dict[str, List[float]] = {"horizontal": [], "vertical": []}
+    for t in texts:
+        if not t["is_numeric"] or t["orientation"] not in raws:
+            continue
+        cx, cy = t["center"]
+        best = None
+        for i in idx.query(cx - 4 * U, cy - 4 * U, cx + 4 * U, cy + 4 * U):
+            a, b = pcs[i]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            if t["orientation"] == "horizontal" and abs(dy) <= tn * abs(dx):
+                lo, hi, along = min(a[0], b[0]), max(a[0], b[0]), cx
+                raw = cy - (a[1] + (cx - a[0]) / dx * dy if abs(dx) > 1e-9 else a[1])
+            elif t["orientation"] == "vertical" and abs(dx) <= tn * abs(dy):
+                lo, hi, along = min(a[1], b[1]), max(a[1], b[1]), cy
+                raw = cx - (a[0] + (cy - a[1]) / dy * dx if abs(dy) > 1e-9 else a[0])
+            else:
+                continue
+            if lo - 0.4 * U <= along <= hi + 0.4 * U and abs(raw) <= 4 * U and (best is None or abs(raw) < abs(best)):
+                best = raw
+        if best is not None:
+            raws[t["orientation"]].append(best)
+    eps = 0.15 * U
+    conv, evidence = {}, {}
+    for o, rs in raws.items():
+        n = len(rs)
+        pos = sum(1 for r in rs if r > eps)
+        neg = sum(1 for r in rs if r < -eps)
+        evidence[o] = {"samples": n, "positive": pos, "negative": neg, "on_wire": n - pos - neg}
+        conv[o] = (None if n < 4 else 1 if pos >= 0.65 * n else -1 if neg >= 0.65 * n
+                   else 0 if (n - pos - neg) >= 0.5 * n else None)
+    dists = []
+    for o, rs in raws.items():
+        c = conv[o] if conv[o] is not None else 1
+        dists += [abs(r) for r in rs if (c == 0 and abs(r) <= 3 * eps) or (c != 0 and c * r > eps)]
+    dists.sort()
+    return {"side_h": conv["horizontal"], "side_v": conv["vertical"],
+            "median_distance": dists[len(dists) // 2] if dists else None, "evidence": evidence}
+
+
+def derive_pdf_config(base: V6Config, prof: dict) -> V6Config:
+    """Every distance threshold rescaled from the reference drawing to this PDF's units."""
+    Ut, Uw, D, UL = prof["text_unit"], prof["wire_unit"], prof["dot_unit"], prof["layout_unit"]
+    g = UL / REF_TEXT_UNIT
+    c = replace(base)
+    c.text_unit, c.wire_unit, c.dot_unit, c.layout_unit = Ut, Uw, D, UL
+    c.wire_width = prof["wire_width"]
+    c.wire_width_tol = max(0.02, 0.06 * Uw)
+    c.text_axis_tol_deg = prof["text_axis_tol_deg"]
+    c.label_min_side = 0.075 * Ut
+    c.label_max_side = prof["label_max_side"]
+    c.label_overlap_tol = 0.35 * Ut
+    c.projection_margin = 0.37 * Ut
+    c.inline_max_side = prof["inline_max_side"]
+    c.side_h, c.side_v = prof["side_h"], prof["side_v"]
+    c.label_slot_gap = 0.093 * Ut
+    c.station_tol = max(1.5 * Uw, 0.15 * UL)
+    c.station_line_max_length = 40.0 * g
+    c.station_merge_dist = 2.0 * g
+    c.small_circle_max_diameter = 1.39 * D
+    # between hatching (2.5 % of the layout unit) and leaders (6 %) on the reference drawing, with
+    # the same margin both ways; independent of the wire pen, so a heavy or fine wire pen does
+    # not turn leaders into texture or hatching into leaders
+    c.significant_min_width = 0.04 * UL
+    c.significant_min_length = 0.6 * UL
+    c.end_margin = 1.0 * g
+    c.terminal_text_radius = 30.0 * g
+    c.element_text_radius = 22.0 * g
+    c.terminal_below_penalty = 6.0 * g
+    c.terminal_below_slack = 3.0 * g
+    c.terminal_inward_penalty = 8.0 * g
+    c.uncertain_text_radius = 15.0 * g
+    c.geometry_match_tol = max(2.8 * Uw, 0.28 * UL)
+    c.group_tol = max(2.8 * Uw, 0.28 * UL)
+    c.missing_position_window = 25.0 * g
+    c.border_corner_tol = 0.46 * UL
+    return c
+
+
+def layout_unit(Ut: float, Uw: float, D: Optional[float], label_distance: Optional[float]) -> float:
+    """Scale of the drawing's layout from three independent cues, expressed in reference text
+    units: the text size, the label placement distance and the pen style (wire pen and junction
+    dot combined, so a drawing with both a fine pen and small dots counts as one style cue).
+    Their median; with two cues, the text size unless the other differs by half or more."""
+    style = Uw * REF_TEXT_UNIT / REF_WIRE_UNIT
+    if D:
+        style = math.sqrt(style * D * REF_TEXT_UNIT / REF_DOT_UNIT)
+    cues = [Ut, style]
+    if label_distance and label_distance > 0.3 * Ut:         # labels beside (not on) their wires
+        cues.append(label_distance * REF_TEXT_UNIT / REF_LABEL_DISTANCE)
+    if len(cues) == 3:
+        return sorted(cues)[1]
+    return Ut if abs(Ut - style) / Ut < 0.5 else min(cues)
+
+
+def text_angle_tolerance(texts: List[dict]) -> float:
+    devs = []
+    for t in texts:
+        a = math.degrees(math.atan2(t["dir"][1], t["dir"][0]))
+        devs.append(min(abs(((a + 45.0) % 90.0) - 45.0), 45.0))
+    devs.sort()
+    if not devs:
+        return 12.0
+    return max(12.0, min(25.0, devs[min(len(devs) - 1, int(0.99 * len(devs)))] + 3.0))
 
 
 # ===========================================================================
@@ -753,9 +1003,30 @@ def normalize_endpoint(raw, fallback_point) -> dict:
     return ep
 
 
+def simplify_polyline(pts: List[Tuple[float, float]], collinear_deg: float = 0.5) -> List[Tuple[float, float]]:
+    """Drop repeated points and vertices where the route does not bend (vector segmentation
+    artefacts); real bends and the point order are kept."""
+    clean: List[Tuple[float, float]] = []
+    for p in pts:
+        if not clean or dist(clean[-1], p) > 1e-3:
+            clean.append(p)
+    if len(clean) <= 2:
+        return clean
+    out = [clean[0]]
+    cos_lim = math.cos(math.radians(collinear_deg))
+    for i in range(1, len(clean) - 1):
+        a, b, c = out[-1], clean[i], clean[i + 1]
+        u, v = unit((b[0] - a[0], b[1] - a[1])), unit((c[0] - b[0], c[1] - b[1]))
+        if u[0] * v[0] + u[1] * v[1] >= cos_lim:
+            continue
+        out.append(b)
+    out.append(clean[-1])
+    return out
+
+
 def normalize_segment(raw: dict, i: int) -> dict:
     poly_raw = raw.get("polyline") or raw.get("points") or raw.get("path") or raw.get("geometry") or []
-    poly = [p for p in (_get_point(q) for q in poly_raw) if p is not None]
+    poly = simplify_polyline([p for p in (_get_point(q) for q in poly_raw) if p is not None])
     if len(poly) < 2:
         raise ValueError(f"segment #{i} has no usable polyline")
     start = normalize_endpoint(raw.get("start"), poly[0])
@@ -829,8 +1100,9 @@ def _match_fraction(points: List[Tuple[float, float]], lines: List[Tuple[Tuple[f
 
 
 def validate_ownership(label: str, data: dict, segs: List[dict], pdf_path: str, pdf_sha: str, page,
-                       vec: dict, cfg: V6Config) -> dict:
-    """Refuse a segment JSON that was not generated from this PDF; detect coordinate frame."""
+                       vec: dict, cfg: V6Config, frame: Optional[dict] = None) -> dict:
+    """Refuse a segment JSON that was not generated from this PDF; detect its coordinate frame
+    and convert every point to the analysis frame (display copies are kept for the output)."""
     src = data.get("source_pdf") or {}
     report = {"method": None, "frame": None, "geometry_match": None}
     if src.get("sha256"):
@@ -843,37 +1115,46 @@ def validate_ownership(label: str, data: dict, segs: List[dict], pdf_path: str, 
             raise OwnershipError(f"Segment JSON {label} was generated for page {src['page']}, "
                                  f"but --page is {page.number}.")
         report["method"] = "sha256"
-    pts = [p for s in segs for p in s["polyline"]]
-    disp = [(l["p0"], l["p1"]) for l in vec["lines"]]
-    frames = {"displayed_page": _match_fraction(pts, disp, cfg.geometry_match_tol)}
+    if frame is None:
+        ident = fitz.Matrix(1, 0, 0, 1, 0, 0)
+        frame = {"M": page.rotation_matrix, "R": ident, "Rinv": ident}
+    H = float(page.mediabox.height)
+    disp = page.rotation_matrix
+    # JSON frame -> displayed page
+    to_disp = {"displayed_page": lambda p: (float(p[0]), float(p[1])),
+               "unrotated_page": lambda p: to_view(disp, p),
+               "unrotated_y_up": lambda p: to_view(disp, (p[0], H - p[1]))}
     declared = str(data.get("coordinate_frame") or "")
-    if declared != "displayed_page":
-        frames["unrotated_page"] = _match_fraction(pts, vec["unrotated_lines"], cfg.geometry_match_tol)
-        H = float(page.mediabox.height)
-        flipped = [((a[0], H - a[1]), (b[0], H - b[1])) for a, b in vec["unrotated_lines"]]
-        frames["unrotated_y_up"] = _match_fraction(pts, flipped, cfg.geometry_match_tol)
-    frame = max(frames.items(), key=lambda kv: kv[1])[0] if declared != "displayed_page" else "displayed_page"
-    report["frame"] = frame
+    if declared == "analysis_frame" and data.get("analysis_to_display"):
+        T = fitz.Matrix(*data["analysis_to_display"])
+        to_disp["analysis_frame"] = lambda p: apply_matrix(T, p)
+        names = ["analysis_frame"]
+    elif declared == "displayed_page":
+        names = ["displayed_page"]
+    else:
+        names = ["displayed_page", "unrotated_page", "unrotated_y_up"]
+    R = frame["R"]
+    pts = [p for s in segs for p in s["polyline"]]
+    lines = [(l["p0"], l["p1"]) for l in vec["lines"]]
+    frames = {k: _match_fraction([apply_matrix(R, to_disp[k](p)) for p in pts], lines, cfg.geometry_match_tol)
+              for k in names}
+    chosen = max(frames.items(), key=lambda kv: kv[1])[0]
+    report["frame"] = chosen
     report["geometry_match"] = {k: rnd(v, 3) for k, v in frames.items()}
-    if frames[frame] < cfg.min_geometry_match:
+    if frames[chosen] < cfg.min_geometry_match:
         raise OwnershipError(
-            f"Segment JSON {label}: only {frames[frame] * 100:.0f}% of its polyline points lie on vector "
+            f"Segment JSON {label}: only {frames[chosen] * 100:.0f}% of its polyline points lie on vector "
             f"lines of '{os.path.basename(pdf_path)}'. The JSON does not belong to this PDF (or page).")
     if report["method"] is None:
         report["method"] = "geometry"
-    if frame != "displayed_page":
-        M = page.rotation_matrix
-        H = float(page.mediabox.height)
-
-        def conv(p):
-            q = (p[0], H - p[1]) if frame == "unrotated_y_up" else p
-            return to_view(M, q)
-        for s in segs:
-            s["polyline"] = [conv(p) for p in s["polyline"]]
-            for ep in (s["start"], s["end"]):
-                ep["point"] = conv(ep["point"])
-                ep["node_point"] = conv(ep["node_point"])
-            s["json_stations"] = [conv(p) for p in s["json_stations"]]
+    f = to_disp[chosen]
+    for s in segs:
+        s["polyline_display"] = [f(p) for p in s["polyline"]]
+        s["polyline"] = [apply_matrix(R, p) for p in s["polyline_display"]]
+        for ep in (s["start"], s["end"]):
+            ep["point_display"], ep["node_point_display"] = f(ep["point"]), f(ep["node_point"])
+            ep["point"], ep["node_point"] = apply_matrix(R, ep["point_display"]), apply_matrix(R, ep["node_point_display"])
+        s["json_stations"] = [apply_matrix(R, f(p)) for p in s["json_stations"]]
     return report
 
 
@@ -926,20 +1207,22 @@ def detect_stations(seg: dict, vec: dict, line_index: GridIndex, circle_index: G
     """Arc-length positions of breakpoints, leader feet and ticks on the route."""
     poly = seg["polyline"]
     L = polyline_length(poly)
+    m = cfg.end_margin
     xs, ys = [p[0] for p in poly], [p[1] for p in poly]
-    box = (min(xs) - 2, min(ys) - 2, max(xs) + 2, max(ys) + 2)
+    pad = 2.0 * cfg.station_tol
+    box = (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
     found = []
     for ci in circle_index.query(*box):
         c = vec["small_circles"][ci]
-        if c["filled"]:
-            continue
+        if c["filled"] and c["diameter"] > cfg.small_circle_max_diameter:
+            continue              # a filled symbol, not a dot (a dot inside a route is a breakpoint)
         d, s, _ = project_on_polyline(c["center"], poly)
-        if d <= cfg.station_tol and 1.0 < s < L - 1.0:
+        if d <= cfg.station_tol and m < s < L - m:
             found.append(s)
     for li in line_index.query(*box):
         o = vec["lines"][li]
-        if o["is_wire"] or o["dashed"] or o["border"] or o["width"] < cfg.station_line_min_width:
-            continue
+        if not o["significant"]:
+            continue              # wire pen, dashed, border or texture (hatching)
         a, b = o["p0"], o["p1"]
         if dist(a, b) > cfg.station_line_max_length:
             continue
@@ -951,11 +1234,11 @@ def detect_stations(seg: dict, vec: dict, line_index: GridIndex, circle_index: G
             hit = touch_or_cross(a, b, p, q, cfg.station_tol)
             if hit is not None:
                 d, s, _ = project_on_polyline(hit, poly)
-                if 1.0 < s < L - 1.0:
+                if m < s < L - m:
                     found.append(s)
     for p in seg["json_stations"]:
         d, s, _ = project_on_polyline(p, poly)
-        if d <= cfg.station_tol and 1.0 < s < L - 1.0:
+        if d <= cfg.station_tol and m < s < L - m:
             found.append(s)
     found.sort()
     merged: List[float] = []
@@ -1001,7 +1284,10 @@ def build_pieces(tag: str, seg: dict, stations: List[float], cfg: V6Config) -> L
 def strict_label_metrics(piece: dict, text: dict, cfg: V6Config) -> Tuple[Optional[dict], str]:
     """Validate one numeric text against one straight piece using the placement conventions.
 
-    Displayed / PDF frame: y grows downwards, so BELOW = larger y and RIGHT = larger x.
+    Analysis frame: y grows downwards, so BELOW = larger y and RIGHT = larger x.  The required
+    side is the calibrated convention of the PDF: side_h +1 = below a horizontal wire (the
+    standard), -1 = above, 0 = printed on the wire; side_v +1 = right of a vertical wire (the
+    standard), -1 = left, 0 = on the wire.
     """
     if not text["is_numeric"]:
         return None, "not_numeric"
@@ -1010,7 +1296,7 @@ def strict_label_metrics(piece: dict, text: dict, cfg: V6Config) -> Tuple[Option
         return None, "angled_piece"            # angled pieces never claim numeric labels
     p0, p1 = piece["start"], piece["end"]
     cx, cy = text["center"]
-    bx0, by0, _, _ = text["bbox"]
+    bx0, by0, bx1, by1 = text["bbox"]
     if orient == "horizontal":
         if text["orientation"] != "horizontal":
             return None, "text_not_horizontal"
@@ -1020,9 +1306,10 @@ def strict_label_metrics(piece: dict, text: dict, cfg: V6Config) -> Tuple[Option
             return None, "outside_projection"
         t = 0.0 if hi - lo <= 1e-9 else min(1.0, max(0.0, (cx - lo) / (hi - lo)))
         wire = a[1] + t * (b[1] - a[1])
-        side = cy - wire                        # > 0 : below the wire
-        gap = by0 - wire
-        half_extent = (text["bbox"][2] - text["bbox"][0]) / 2.0
+        raw = cy - wire                         # > 0 : below the wire
+        conv = 1 if cfg.side_h is None else cfg.side_h
+        gap = (by0 - wire) if conv >= 0 else (wire - by1)
+        half_extent = (bx1 - bx0) / 2.0
     else:
         if text["orientation"] != "vertical":
             return None, "text_not_vertical"
@@ -1032,21 +1319,30 @@ def strict_label_metrics(piece: dict, text: dict, cfg: V6Config) -> Tuple[Option
             return None, "outside_projection"
         t = 0.0 if hi - lo <= 1e-9 else min(1.0, max(0.0, (cy - lo) / (hi - lo)))
         wire = a[0] + t * (b[0] - a[0])
-        side = cx - wire                        # > 0 : right of the wire
-        gap = bx0 - wire
-        half_extent = (text["bbox"][3] - text["bbox"][1]) / 2.0
-    if side <= cfg.label_min_side:
-        return None, "wrong_side"
-    if side > cfg.label_max_side:
-        return None, "too_far"
-    if gap < -cfg.label_overlap_tol:
-        return None, "overlaps_wire"
+        raw = cx - wire                         # > 0 : right of the wire
+        conv = 1 if cfg.side_v is None else cfg.side_v
+        gap = (bx0 - wire) if conv >= 0 else (wire - bx1)
+        half_extent = (by1 - by0) / 2.0
+    if conv == 0:                               # numbers printed on the wire
+        side = abs(raw)
+        limit = cfg.inline_max_side
+        if side > limit:
+            return None, "too_far"
+    else:
+        side = conv * raw
+        limit = cfg.label_max_side
+        if side <= cfg.label_min_side:
+            return None, "wrong_side"
+        if side > limit:
+            return None, "too_far"
+        if gap < -cfg.label_overlap_tol:
+            return None, "overlaps_wire"
     length = hi - lo
     mid = (lo + hi) / 2.0
     centre_err = abs(along - mid)
-    half = max(length / 2.0, 1.0)
+    half = max(length / 2.0, 0.2 * cfg.text_unit)
     projection = 0.5 if length <= 1e-9 else (along - lo) / length
-    score = (cfg.weight_perpendicular * side / cfg.label_max_side
+    score = (cfg.weight_perpendicular * side / limit
              + cfg.weight_centre * min(centre_err / half, 2.0))
     # position along the oriented piece (start -> end)
     along_piece = (along - lo) if (p0[0] <= p1[0] if orient == "horizontal" else p0[1] <= p1[1]) else (hi - along)
@@ -1060,7 +1356,7 @@ def strict_label_metrics(piece: dict, text: dict, cfg: V6Config) -> Tuple[Option
 def assign_numeric_labels(texts: List[dict], pieces: List[dict], cfg: V6Config) -> Tuple[List[dict], dict]:
     """Global greedy assignment: every numeric text object is owned by at most one wire piece."""
     pidx = GridIndex(25.0)
-    m = cfg.label_max_side + cfg.projection_margin + 1.0
+    m = max(cfg.label_max_side, cfg.inline_max_side) + cfg.projection_margin + 1.0
     for i, p in enumerate(pieces):
         pidx.insert(i, min(p["start"][0], p["end"][0]) - m, min(p["start"][1], p["end"][1]) - m,
                     max(p["start"][0], p["end"][0]) + m, max(p["start"][1], p["end"][1]) + m)
@@ -1160,12 +1456,15 @@ def enrich_identities(segs: List[dict], groups: Dict[str, List[Tuple[int, str]]]
             if d > radius:
                 continue
             score = d
-            if t["center"][1] > p[1] + 3.0:
-                score += cfg.terminal_below_penalty          # prefer text above / level with the end
-            if not is_element:
-                v = (t["center"][0] - p[0], t["center"][1] - p[1])
-                if v[0] * inward[0] + v[1] * inward[1] > 2.0:
-                    score += cfg.terminal_inward_penalty     # text lying over the wire side
+            v = (t["center"][0] - p[0], t["center"][1] - p[1])
+            up = (t["dir"][1], -t["dir"][0])                 # "up" in the text's own reading frame
+            below = -(v[0] * up[0] + v[1] * up[1])
+            if below > 0:                                    # prefer text above / level with the end
+                score += cfg.terminal_below_penalty * min(1.0, below / (2.0 * cfg.terminal_below_slack))
+            # names are printed level with their terminal: small cost for being off that line
+            score += cfg.terminal_align_weight * max(0.0, abs(below) - 0.5 * cfg.text_unit)
+            if not is_element and v[0] * inward[0] + v[1] * inward[1] > 0.67 * cfg.terminal_below_slack:
+                score += cfg.terminal_inward_penalty         # text lying over the wire side
             cands.append((score, d, key, ti))
     cands.sort(key=lambda c: (c[0], c[1], c[2], texts[c[3]]["id"]))
     used_text, used_node = set(), set()
@@ -1186,12 +1485,13 @@ def enrich_identities(segs: List[dict], groups: Dict[str, List[Tuple[int, str]]]
             continue
         p = nd["point"]
         best = None
-        for ti in tindex.query(p[0] - 12, p[1] - 12, p[0] + 12, p[1] + 12):
+        rw = 0.4 * cfg.terminal_text_radius
+        for ti in tindex.query(p[0] - rw, p[1] - rw, p[0] + rw, p[1] + rw):
             t = texts[ti]
             if ti in used_text or annotation_keyword(t["norm"]) != "BRAID":
                 continue
             d = rect_distance(p, t["bbox"])
-            if d <= 12 and (best is None or d < best[0]):
+            if d <= rw and (best is None or d < best[0]):
                 best = (d, ti)
         if best:
             used_text.add(best[1])
@@ -1241,7 +1541,7 @@ def enrich_identities(segs: List[dict], groups: Dict[str, List[Tuple[int, str]]]
 # Sequence rebuild, junction ID rebuild, segment keys
 # ===========================================================================
 
-def estimate_missing_positions(seg: dict, texts: List[dict], tindex: GridIndex) -> None:
+def estimate_missing_positions(seg: dict, texts: List[dict], tindex: GridIndex, window: float = 25.0) -> None:
     """Original ELEMENT items without a stored position: project their annotation text on the route."""
     used = set()
     poly = seg["polyline"]
@@ -1252,14 +1552,14 @@ def estimate_missing_positions(seg: dict, texts: List[dict], tindex: GridIndex) 
         val = token_value(it["token"])
         kw = annotation_keyword(val)
         best = None
-        for ti in tindex.query(min(xs) - 25, min(ys) - 25, max(xs) + 25, max(ys) + 25):
+        for ti in tindex.query(min(xs) - window, min(ys) - window, max(xs) + window, max(ys) + window):
             t = texts[ti]
             if ti in used:
                 continue
             if not (t["norm"] == val or (kw and annotation_keyword(t["norm"]) == kw)):
                 continue
             d, s, _ = project_on_polyline(t["center"], poly)
-            if d <= 25 and (best is None or d < best[0]):
+            if d <= window and (best is None or d < best[0]):
                 best = (d, s, ti)
         if best:
             used.add(best[2])
@@ -1267,7 +1567,8 @@ def estimate_missing_positions(seg: dict, texts: List[dict], tindex: GridIndex) 
             it["s_estimated"] = True
 
 
-def rebuild_sequences(segs: List[dict], assignments: List[dict], texts: List[dict]) -> None:
+def rebuild_sequences(segs: List[dict], assignments: List[dict], texts: List[dict],
+                      window: float = 25.0) -> None:
     by_seg: Dict[int, List[dict]] = defaultdict(list)
     for a in assignments:
         by_seg[a["segment_index"]].append(a)
@@ -1275,7 +1576,7 @@ def rebuild_sequences(segs: List[dict], assignments: List[dict], texts: List[dic
     for i, t in enumerate(texts):
         tindex.insert(i, *t["bbox"])
     for s in segs:
-        estimate_missing_positions(s, texts, tindex)
+        estimate_missing_positions(s, texts, tindex, window)
         items = []
         for a in by_seg.get(s["index"], []):
             items.append({"kind": "WIRE", "value": a["value"], "token": f"WIRE:{a['value']}", "s": a["s"],
@@ -1678,13 +1979,13 @@ def classify_pair(sa: dict, sb: dict, pair: dict, ctx: dict, cfg: V6Config) -> d
                 x = op["a_token"]
                 v = token_value(x)
                 if cb_o[x] > cb_r[x] or ca_r[x] > ca_o[x] or \
-                        visible_near(v, sb, ctx["texts_b"], ctx["tindex_b"], cfg.uncertain_text_radius):
+                        visible_near(v, sb, ctx["texts_b"], ctx["tindex_b"], ctx.get("radius_b", cfg.uncertain_text_radius)):
                     unsure.append(f"{x} is still present / visible in PDF B near this segment")
             if op["b_token"] and token_kind(op["b_token"]) == "WIRE":
                 y = op["b_token"]
                 v = token_value(y)
                 if ca_o[y] > ca_r[y] or cb_r[y] > cb_o[y] or \
-                        visible_near(v, sa, ctx["texts_a"], ctx["tindex_a"], cfg.uncertain_text_radius):
+                        visible_near(v, sa, ctx["texts_a"], ctx["tindex_a"], ctx.get("radius_a", cfg.uncertain_text_radius)):
                     unsure.append(f"{y} is also present / visible in PDF A near this segment")
             flag = "uncertain" if unsure else "real"
         else:
@@ -1815,7 +2116,8 @@ def build_node_table(R: dict) -> Dict[str, dict]:
             nbrs.append((segs[si]["end" if side == "start" else "start"]["node_key"], si))
         table[key] = {"key": key, "type": t, "name": e0.get("name"), "labels": e0.get("labels"),
                       "rlabels": e0.get("rebuilt_labels"), "nbrs": nbrs, "id": final_id(e0),
-                      "original_id": e0["original_structural_id"], "point": rpt(e0["node_point"])}
+                      "original_id": e0["original_structural_id"],
+                      "point": rpt(e0.get("node_point_display") or e0["node_point"])}
     return table
 
 
@@ -1947,8 +2249,10 @@ def junction_report(na: Dict[str, dict], nb: Dict[str, dict], a2b: dict, cfg: V6
 # ===========================================================================
 
 def ep_json(ep: dict) -> dict:
+    """Endpoint record; points in the displayed page frame."""
     out = {"type": ep["type"], "structural_id": final_id(ep), "original_structural_id": ep["original_structural_id"],
-           "point": rpt(ep["point"]), "node_point": rpt(ep["node_point"])}
+           "point": rpt(ep.get("point_display") or ep["point"]),
+           "node_point": rpt(ep.get("node_point_display") or ep["node_point"])}
     if ep["type"] == "junction":
         out["depth1_labels"] = ep.get("labels")
         out["rebuilt_depth1_labels"] = ep.get("rebuilt_labels")
@@ -1966,26 +2270,106 @@ def seg_summary(s: dict, with_polyline: bool = False) -> dict:
            "wire_numbers": s["reb_wires"], "original_wire_numbers": s["orig_wires"],
            "length": rnd(polyline_length(s["polyline"]))}
     if with_polyline:
-        out["polyline"] = [rpt(p) for p in s["polyline"]]
+        out["polyline"] = [rpt(p) for p in s.get("polyline_display") or s["polyline"]]
     return out
 
 
+def junction_dot_diameter(segs: List[dict], circles: List[dict], text_unit: float) -> Optional[float]:
+    """Median outer diameter of the junction dots (a filled circle, with any concentric rings)
+    sitting on the junction endpoints of the segments."""
+    idx = GridIndex(10.0)
+    for i, c in enumerate(circles):
+        idx.insert(i, c["center"][0], c["center"][1], c["center"][0], c["center"][1])
+    r = 0.3 * text_unit
+    found = {}
+    for s in segs:
+        for ep in (s["start"], s["end"]):
+            if ep["type"] != "junction":
+                continue
+            p = ep["node_point"]
+            key = (round(p[0], 1), round(p[1], 1))
+            if key in found:
+                continue
+            here = [circles[i] for i in idx.query(p[0] - r, p[1] - r, p[0] + r, p[1] + r)
+                    if dist(p, circles[i]["center"]) <= r and circles[i]["diameter"] <= 1.5 * text_unit]
+            if any(c["filled"] for c in here):
+                found[key] = max(c["diameter"] for c in here)
+    ds = sorted(found.values())
+    return ds[len(ds) // 2] if len(ds) >= 3 else None
+
+
+def calibrate_pdf(segs: List[dict], texts: List[dict], vec: dict, frame: dict, Ut: float, cfg: V6Config) -> dict:
+    """Profile of one PDF: units (text, wire pen, junction dot, layout) and label convention,
+    measured on the segments of its JSON.  Explicit settings in cfg are kept."""
+    tol = max(0.3, 0.1 * Ut)
+    if cfg.wire_width is not None:
+        Uw, src = cfg.wire_width, "explicit"
+    else:
+        Uw, src = wire_pen_from_segments(segs, vec["lines"], tol), "lines_under_segments"
+        if Uw is None:
+            Uw, src = REF_WIRE_UNIT * Ut / REF_TEXT_UNIT, "scaled_default"
+    D = junction_dot_diameter(segs, vec["small_circles"], Ut)
+    lab = calibrate_labels(segs, texts, Ut, cfg.axis_tol_deg)
+    UL = layout_unit(Ut, Uw, D, lab["median_distance"])
+    D = D if D else REF_DOT_UNIT * UL / REF_TEXT_UNIT
+    side_h = cfg.side_h if cfg.side_h is not None else (lab["side_h"] if lab["side_h"] is not None else 1)
+    side_v = cfg.side_v if cfg.side_v is not None else (lab["side_v"] if lab["side_v"] is not None else 1)
+    med = lab["median_distance"]
+    if cfg.label_max_side_override is not None:
+        max_side = cfg.label_max_side_override
+    elif med:
+        max_side = max(2.4 * med, 1.2 * Ut)
+    else:
+        max_side = cfg.label_max_side * Ut / REF_TEXT_UNIT
+    return {
+        "deskew_deg": rnd(frame["theta"], 3), "axis_support": rnd(frame["support"], 3),
+        "text_unit": rnd(Ut, 4), "wire_unit": Uw, "wire_width": Uw, "wire_width_source": src,
+        "dot_unit": rnd(D, 4), "layout_unit": rnd(UL, 4),
+        "label_median_distance": rnd(med, 4) if med else None, "label_max_side": rnd(max_side, 4),
+        "inline_max_side": rnd(max(0.6 * Ut, 1.2 * (med or 0)), 4),
+        "side_h": side_h, "side_v": side_v, "side_evidence": lab["evidence"],
+        "text_axis_tol_deg": rnd(text_angle_tolerance(texts), 2),
+    }
+
+
 def process_pdf(tag: str, pdf_path: str, seg_path: str, page, cfg: V6Config) -> dict:
-    """Load + validate one segment JSON against its PDF page, then rebuild text associations."""
+    """Load + validate one segment JSON against its PDF page, calibrate the PDF, then rebuild
+    the text associations with thresholds in this PDF's own units."""
     data = load_segments_json(seg_path)
     segs = [normalize_segment(raw, i) for i, raw in enumerate(data["segments"])]
     if len({s["index"] for s in segs}) != len(segs):
         for i, s in enumerate(segs):
             s["index"] = i
     sha = sha256_file(pdf_path)
-    all_texts = extract_texts(page, cfg)
     drawings = page.get_drawings()
-    border = detect_sheet_border(page, drawings, [tuple(t["center"]) for t in all_texts], cfg)
-    texts = [t for t in all_texts if not is_border_text(t, border)]   # zone markers never label wires
-    for i, t in enumerate(texts):
-        t["id"] = f"T{i:05d}"
-    vec = extract_vectors(page, cfg, drawings, border)
-    ownership = validate_ownership(tag, data, segs, pdf_path, sha, page, vec, cfg)
+    frame = make_frame(page, cfg, drawings)
+    probe = extract_texts(page, cfg, frame["M"], frame["view"])
+    axis_tol = text_angle_tolerance(probe)
+    all_texts = extract_texts(page, replace(cfg, text_axis_tol_deg=axis_tol), frame["M"], frame["view"])
+    sizes = sorted(t["font_size"] for t in all_texts if t["is_numeric"] and t["font_size"] > 0) or \
+        sorted(t["font_size"] for t in all_texts if t["font_size"] > 0)
+    Ut = sizes[len(sizes) // 2] if sizes else REF_TEXT_UNIT     # first guess; refined below
+
+    def extract(Ut: float):
+        pre = replace(cfg, text_axis_tol_deg=axis_tol, text_unit=Ut, layout_unit=Ut, border_corner_tol=0.46 * Ut,
+                      wire_unit=cfg.wire_width if cfg.wire_width is not None else REF_WIRE_UNIT * Ut / REF_TEXT_UNIT,
+                      geometry_match_tol=max(cfg.geometry_match_tol * Ut / REF_TEXT_UNIT, 0.28 * Ut))
+        border = detect_sheet_border(page, drawings, [tuple(t["center"]) for t in all_texts], pre, frame["M"])
+        texts = [t for t in all_texts if not is_border_text(t, border)]   # zone markers never label wires
+        for i, t in enumerate(texts):
+            t["id"] = f"T{i:05d}"
+        return pre, border, texts, extract_vectors(page, pre, drawings, border, frame["M"])
+
+    pre, border, texts, vec = extract(Ut)
+    ownership = validate_ownership(tag, data, segs, pdf_path, sha, page, vec, pre, frame)
+    lu = label_text_unit(segs, texts)
+    if lu is not None and abs(lu - Ut) > 0.1 * Ut:
+        Ut = lu                           # e.g. zone numbers of several sheets outnumber the wire numbers
+        pre, border, texts, vec = extract(Ut)
+    prof = calibrate_pdf(segs, texts, vec, frame, Ut, cfg)
+    pcfg = derive_pdf_config(cfg, prof)
+    pcfg.projection_margin = cfg.projection_margin * Ut / REF_TEXT_UNIT
+    flag_lines(vec, pcfg)
     segs_all = segs
     ignored = []
     for s in segs_all:                    # safety net for segment JSON that still contains the frame
@@ -1996,33 +2380,43 @@ def process_pdf(tag: str, pdf_path: str, seg_path: str, page, cfg: V6Config) -> 
             s["ignored"] = "sheet border / frame geometry, not a harness wire"
             ignored.append({"segment_index": s["index"], "segment_key": s["orig_key"], "reason": s["ignored"]})
     segs = [s for s in segs_all if not s.get("ignored")]
-    groups = group_nodes(segs)
+    groups = group_nodes(segs, pcfg.group_tol)
     # straight wire pieces (stations divide label spans)
     lidx, cidx = GridIndex(25.0), GridIndex(25.0)
     for i, l in enumerate(vec["lines"]):
-        lidx.insert(i, l["p0"][0], l["p0"][1], l["p1"][0], l["p1"][1])
+        if l["significant"] and dist(l["p0"], l["p1"]) <= pcfg.station_line_max_length:
+            lidx.insert(i, l["p0"][0], l["p0"][1], l["p1"][0], l["p1"][1])
     for i, c in enumerate(vec["small_circles"]):
         cidx.insert(i, c["center"][0], c["center"][1], c["center"][0], c["center"][1])
     pieces = []
     for s in segs:
-        s["stations"] = detect_stations(s, vec, lidx, cidx, cfg)
-        s["pieces"] = build_pieces(tag, s, s["stations"], cfg)
+        s["stations"] = detect_stations(s, vec, lidx, cidx, pcfg)
+        s["pieces"] = build_pieces(tag, s, s["stations"], pcfg)
         pieces.extend(s["pieces"])
-    assignments, text_diag = assign_numeric_labels(texts, pieces, cfg)
-    rebuild_sequences(segs, assignments, texts)
-    term_diag = enrich_identities(segs, groups, texts, cfg)
+    assignments, text_diag = assign_numeric_labels(texts, pieces, pcfg)
+    Rinv = frame["Rinv"]
+    for a in assignments:                 # reported in the displayed page frame
+        a["text_center"] = rpt(apply_matrix(Rinv, a["text_center"]))
+    rebuild_sequences(segs, assignments, texts, pcfg.missing_position_window)
+    term_diag = enrich_identities(segs, groups, texts, pcfg)
     rebuild_junction_ids(segs, groups)
     for s in segs:
         s["key"] = segment_key(final_id(s["start"]), final_id(s["end"]))
     tindex = GridIndex(20.0)
     for i, t in enumerate(texts):
         tindex.insert(i, *t["bbox"])
-    border_report = {"frames": [list(f) for f in border["frames"]],
-                     "drawing_area": [rnd(v) for v in border["inner"]] if border["inner"] else None,
+
+    def show(r):
+        pts = [apply_matrix(Rinv, (r[0], r[1])), apply_matrix(Rinv, (r[2], r[1])),
+               apply_matrix(Rinv, (r[2], r[3])), apply_matrix(Rinv, (r[0], r[3]))]
+        return [rnd(min(p[0] for p in pts)), rnd(min(p[1] for p in pts)),
+                rnd(max(p[0] for p in pts)), rnd(max(p[1] for p in pts))]
+    border_report = {"frames": [show(f) for f in border["frames"]],
+                     "drawing_area": show(border["inner"]) if border["inner"] else None,
                      "margin_texts_excluded": len(all_texts) - len(texts),
                      "ignored_segments": ignored}
     return {"tag": tag, "pdf": pdf_path, "sha256": sha, "segments_path": seg_path, "data": data, "segs": segs,
-            "segs_all": segs_all, "border": border_report,
+            "segs_all": segs_all, "border": border_report, "cfg": pcfg, "profile": prof, "frame": frame,
             "groups": groups, "texts": texts, "tindex": tindex, "pieces": pieces, "assignments": assignments,
             "text_diag": text_diag, "terminal_diag": term_diag, "ownership": ownership}
 
@@ -2030,6 +2424,7 @@ def process_pdf(tag: str, pdf_path: str, seg_path: str, page, cfg: V6Config) -> 
 def corrected_json(res: dict, cfg: V6Config) -> dict:
     """Original JSON preserved; corrected / rebuilt fields added next to it."""
     data = copy.deepcopy(res["data"])
+    Rinv = res["frame"]["Rinv"]
     for i, raw in enumerate(data["segments"]):
         s = res["segs_all"][i]                      # normalized in the same order as the JSON
         if s.get("ignored"):
@@ -2047,8 +2442,9 @@ def corrected_json(res: dict, cfg: V6Config) -> dict:
         raw["rebuilt_items"] = s["reb_items"]
         raw["numeric_text_assignments"] = s["assignments"]
         raw["wire_pieces"] = [{"piece_id": p["piece_id"], "piece_index": p["piece_index"],
-                               "polyline_edge_index": p["polyline_edge_index"], "start": rpt(p["start"]),
-                               "end": rpt(p["end"]), "orientation": p["orientation"], "length": rnd(p["length"]),
+                               "polyline_edge_index": p["polyline_edge_index"],
+                               "start": rpt(apply_matrix(Rinv, p["start"])), "end": rpt(apply_matrix(Rinv, p["end"])),
+                               "orientation": p["orientation"], "length": rnd(p["length"]),
                                "cum_start": rnd(p["cum_start"]), "cum_end": rnd(p["cum_end"])} for p in s["pieces"]]
         raw["stations_v6"] = [rnd(x) for x in s["stations"]]
         for side in ("start", "end"):
@@ -2062,7 +2458,8 @@ def corrected_json(res: dict, cfg: V6Config) -> dict:
             "start_identity": s["start"].get("name_confidence"),
             "end_identity": s["end"].get("name_confidence"),
         }
-    data["v6"] = {"script": os.path.basename(__file__), "version": VERSION, "config": cfg.to_dict(),
+    data["v6"] = {"script": os.path.basename(__file__), "version": VERSION, "config": res["cfg"].to_dict(),
+                  "calibration": res["profile"],
                   "ownership_check": res["ownership"], "sheet_border": res["border"],
                   "text_assignment": res["text_diag"],
                   "terminal_assignment": res["terminal_diag"]}
@@ -2078,7 +2475,8 @@ def compare(A: dict, B: dict, cfg: V6Config) -> dict:
     na, nb = build_node_table(A), build_node_table(B)
     a2b, b2a = node_correspondence(na, nb, cfg)
     ctx = {"a2b": a2b, "b2a": b2a, "texts_a": A["texts"], "tindex_a": A["tindex"],
-           "texts_b": B["texts"], "tindex_b": B["tindex"]}
+           "texts_b": B["texts"], "tindex_b": B["tindex"],
+           "radius_a": A["cfg"].uncertain_text_radius, "radius_b": B["cfg"].uncertain_text_radius}
     cands = []
     for i, j in candidate_pairs(sa_list, sb_list, a2b):
         p = score_pair(sa_list[i], sb_list[j], cfg, ctx)
@@ -2251,8 +2649,8 @@ def render_marked(page, zoom: float, marks: List[Tuple[List[Tuple[float, float]]
 
 
 def build_marks(cmp_res: dict, A: dict, B: dict, cfg: V6Config):
-    poly_a = {s["index"]: s["polyline"] for s in A["segs"]}
-    poly_b = {s["index"]: s["polyline"] for s in B["segs"]}
+    poly_a = {s["index"]: s.get("polyline_display") or s["polyline"] for s in A["segs"]}
+    poly_b = {s["index"]: s.get("polyline_display") or s["polyline"] for s in B["segs"]}
     ma, mb = [], []
     for rec in cmp_res["changed"]:
         ma.append((poly_a[rec["segment_a"]["segment_index"]], COLORS["changed"], rec["finding_id"], False))
@@ -2306,6 +2704,10 @@ def self_check(A: dict, B: dict) -> List[str]:
 # Command line
 # ===========================================================================
 
+SIDE_CHOICES_H = {"auto": None, "below": 1, "above": -1, "on-wire": 0}
+SIDE_CHOICES_V = {"auto": None, "right": 1, "left": -1, "on-wire": 0}
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description="Script 3 (v6): strict global text ownership and structural comparison of two harness PDFs.")
@@ -2316,13 +2718,23 @@ def parse_args(argv=None):
     ap.add_argument("--out", required=True, help="Output directory.")
     ap.add_argument("--page", type=int, default=0, help="Zero-based page number (default 0).")
     ap.add_argument("--zoom", type=float, default=3.0, help="Rendering zoom (default 3.0).")
-    ap.add_argument("--wire-width", default="0.539",
-                    help="Harness wire stroke width in pt, 'auto' or 'none' (default 0.539). Only used to keep "
-                         "wire vectors out of the station (label-span divider) list.")
-    ap.add_argument("--label-max-side", type=float, default=10.5,
-                    help="Max distance (pt) from wire to numeric label centre on the required side.")
+    ap.add_argument("--wire-width", default="auto",
+                    help="Harness wire stroke width in pt, or 'auto' (default): the pen of the PDF lines under "
+                         "the segment polylines, measured per PDF.")
+    ap.add_argument("--label-max-side", default="auto",
+                    help="Max distance (pt) from wire to numeric label centre on the required side, or 'auto' "
+                         "(default): 2.4 x the measured typical label distance of each PDF.")
+    ap.add_argument("--label-side-h", choices=SIDE_CHOICES_H, default="auto",
+                    help="Side of horizontal wires that carries their numbers (default auto = measured, "
+                         "falling back to below).")
+    ap.add_argument("--label-side-v", choices=SIDE_CHOICES_V, default="auto",
+                    help="Side of vertical wires that carries their numbers (default auto = measured, "
+                         "falling back to right).")
+    ap.add_argument("--no-deskew", action="store_true",
+                    help="Do not straighten a drawing that is rotated off the page axes.")
     ap.add_argument("--projection-margin", type=float, default=2.0,
-                    help="Max distance (pt) a label centre may project beyond a straight piece end.")
+                    help="Max distance a label centre may project beyond a straight piece end, in pt of the "
+                         "reference drawing (rescaled to each PDF's text size).")
     ap.add_argument("--mark-same", action="store_true", help="Also draw same / probable-same segments (thin blue).")
     return ap.parse_args(argv)
 
@@ -2331,13 +2743,21 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     cfg = V6Config()
     ww = str(args.wire_width).strip().lower()
+    lm = str(args.label_max_side).strip().lower()
     try:
         cfg.wire_width = None if ww in ("none", "auto", "") else float(ww)
+        cfg.label_max_side_override = None if lm in ("auto", "") else float(lm)
     except ValueError:
-        print(f"ERROR: --wire-width must be a number, 'auto' or 'none' (got {args.wire_width!r})", file=sys.stderr)
+        print("ERROR: --wire-width and --label-max-side take a number or 'auto' "
+              f"(got {args.wire_width!r}, {args.label_max_side!r})", file=sys.stderr)
         return 2
-    cfg.wire_width_auto = ww == "auto"
-    cfg.label_max_side = float(args.label_max_side)
+    if (cfg.wire_width is not None and cfg.wire_width <= 0) or \
+            (cfg.label_max_side_override is not None and cfg.label_max_side_override <= 0):
+        print("ERROR: --wire-width and --label-max-side must be positive", file=sys.stderr)
+        return 2
+    cfg.wire_width_auto = cfg.wire_width is None
+    cfg.side_h, cfg.side_v = SIDE_CHOICES_H[args.label_side_h], SIDE_CHOICES_V[args.label_side_v]
+    cfg.deskew = not args.no_deskew
     cfg.projection_margin = float(args.projection_margin)
     cfg.mark_same = bool(args.mark_same)
 
@@ -2420,6 +2840,7 @@ def main(argv=None) -> int:
                 "page": args.page, "zoom": args.zoom,
                 "ownership_check_a": A["ownership"], "ownership_check_b": B["ownership"],
                 "sheet_border_a": A["border"], "sheet_border_b": B["border"],
+                "calibration_a": A["profile"], "calibration_b": B["profile"],
             },
             "diagnostics": {
                 "text_assignment_a": A["text_diag"], "text_assignment_b": B["text_diag"],
@@ -2427,6 +2848,7 @@ def main(argv=None) -> int:
                 "numeric_text_assignments_a": A["assignments"], "numeric_text_assignments_b": B["assignments"],
             },
             "config": cfg.to_dict(),
+            "config_a": A["cfg"].to_dict(), "config_b": B["cfg"].to_dict(),
             "generator": {"script": os.path.basename(__file__), "version": VERSION},
         }
         with open(out_cmp, "w", encoding="utf-8") as fh:
@@ -2449,6 +2871,11 @@ def main(argv=None) -> int:
           f"{summary['numeric_labels_assigned_a']} numeric labels owned, check: {A['ownership']['method']})")
     print(f"  PDF B          : {args.pdf_b}  ({summary['segments_b']} segments, "
           f"{summary['numeric_labels_assigned_b']} numeric labels owned, check: {B['ownership']['method']})")
+    for tag, R in (("A", A), ("B", B)):
+        pr = R["profile"]
+        print(f"  Calibration {tag}  : text {pr['text_unit']}  wire pen {pr['wire_unit']} ({pr['wire_width_source']})  "
+              f"dot {pr['dot_unit']}  skew {pr['deskew_deg']} deg  labels h={pr['side_h']} v={pr['side_v']} "
+              f"max {pr['label_max_side']}")
     print(f"  Sheet border   : A {summary['sheet_frames_a']} frame(s), B {summary['sheet_frames_b']} frame(s); "
           f"margin texts excluded A {A['border']['margin_texts_excluded']}, B {B['border']['margin_texts_excluded']}; "
           f"border segments ignored A {summary['ignored_border_segments_a']}, B {summary['ignored_border_segments_b']}")

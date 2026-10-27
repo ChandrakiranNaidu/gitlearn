@@ -50,7 +50,7 @@ import math
 import os
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -65,11 +65,9 @@ SCHEMA = "harness-segments/1"
 
 @dataclass
 class SegmentConfig:
+    """Distances in pt for the reference drawing; scaled() rescales them to a PDF's own units."""
     station_tol: float = 0.8              # stations (breakpoints, leader feet, ticks) on the wire
-    station_line_min_width: float = 0.25  # thinner lines (hatching) are never stations
     station_line_max_length: float = 40.0
-    leader_min_width: float = 0.25
-    leader_max_width: float = 0.6
     leader_wire_tol: float = 1.0          # leader foot must touch the wire
     leader_text_reach: float = 12.0       # leader head must be this close to the annotation text
     annotation_fallback_dist: float = 6.0
@@ -79,6 +77,43 @@ class SegmentConfig:
     component_text_radius: float = 15.0
     initial_label_max_dist: float = 10.5  # Script 2 initial (distance based) association
     end_component_reach: float = 40.0     # named box this close to an unnamed wire end names it
+    caption_min: float = 2.0              # caption above an annotation keyword, distance window
+    caption_max: float = 14.0
+    station_merge: float = 2.0
+    end_margin: float = 1.0               # stations / annotations this close to a route end belong to the node
+    name_below_penalty: float = 4.0
+    name_below_slack: float = 3.0
+    name_align_weight: float = 0.25       # per pt off the symbol's line in the text's reading frame
+    name_align_dead: float = 2.7          # ... beyond half a text height
+    weak_name_radius: float = 12.0
+    collinear_deg: float = 0.5            # polyline vertices bending less than this are dropped
+
+    @classmethod
+    def scaled(cls, cfg: "eng.EngineConfig") -> "SegmentConfig":
+        """Reference distances x (layout unit / reference), wire-pen and text distances by their units."""
+        g = cfg.layout_unit / eng.REF_TEXT_UNIT
+        t = cfg.text_unit / eng.REF_TEXT_UNIT
+        return cls(
+            station_tol=max(1.5 * cfg.wire_unit, 0.16 * cfg.layout_unit),
+            station_line_max_length=40.0 * g,
+            leader_wire_tol=0.5 * cfg.wire_unit + 0.15 * cfg.layout_unit,   # foot on the wire edge
+            leader_text_reach=12.0 * g,
+            annotation_fallback_dist=6.0 * g,
+            node_annotation_tol=1.0 * g,
+            component_min_size=3.0 * g,
+            component_max_size=60.0 * g,
+            component_text_radius=15.0 * g,
+            initial_label_max_dist=cfg.label_max_side,
+            end_component_reach=40.0 * g,
+            caption_min=2.0 * t,
+            caption_max=14.0 * t,
+            station_merge=2.0 * g,
+            end_margin=1.0 * g,
+            name_below_penalty=4.0 * g,
+            name_below_slack=3.0 * g,
+            name_align_dead=0.5 * cfg.text_unit,
+            weak_name_radius=12.0 * g,
+        )
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -154,7 +189,15 @@ def canonical_name(name: str) -> str:
 
 
 def name_candidates(point: Sequence[float], texts: List[dict], tindex: eng.GridIndex, radius: float,
-                    allow_spec: bool = False) -> List[Tuple[float, dict]]:
+                    allow_spec: bool = False, scfg: Optional["SegmentConfig"] = None,
+                    inward: Optional[Tuple[float, float]] = None) -> List[Tuple[float, dict]]:
+    """Meaningful identifiers near a point, best first.
+
+    Penalised: text below the point in the text's own reading frame (names are written
+    above / level with their symbol; this stays true when the whole drawing is rotated)
+    and text lying over the wire side of a wire end (inward).
+    """
+    scfg = scfg or SegmentConfig()
     out = []
     for ti in tindex.query(point[0] - radius, point[1] - radius, point[0] + radius, point[1] + radius):
         t = texts[ti]
@@ -165,8 +208,17 @@ def name_candidates(point: Sequence[float], texts: List[dict], tindex: eng.GridI
         ok = eng.is_meaningful_identifier(norm) or (allow_spec and eng.is_spec_code(norm))
         if not ok:
             continue
-        below_penalty = 4.0 if t["center"][1] > point[1] + 3.0 else 0.0
-        out.append((d + below_penalty, t))
+        up = (t["dir"][1], -t["dir"][0])
+        v = (t["center"][0] - point[0], t["center"][1] - point[1])
+        score = d
+        below = -(v[0] * up[0] + v[1] * up[1])
+        if below > 0:          # ramp, not a step: no cliff for names right at the slack
+            score += scfg.name_below_penalty * min(1.0, below / (2.0 * scfg.name_below_slack))
+        # names are printed level with their symbol: small cost for being off that line
+        score += scfg.name_align_weight * max(0.0, abs(below) - scfg.name_align_dead)
+        if inward is not None and v[0] * inward[0] + v[1] * inward[1] > scfg.name_below_slack:
+            score += 2.0 * scfg.name_below_penalty
+        out.append((score, t))
     out.sort(key=lambda x: (x[0], x[1]["id"]))
     return out
 
@@ -188,37 +240,57 @@ def weak_name(point: Sequence[float], texts: List[dict], tindex: eng.GridIndex, 
     return best[1] if best else None
 
 
-def assign_node_identities(ext: dict, cfg: eng.EngineConfig) -> None:
-    """Structural IDs for boundary nodes (junction IDs come from Script 1's depth-1 tracing)."""
+def _inward(graph: dict, n: dict) -> Optional[Tuple[float, float]]:
+    """Unit vector from a wire end into its wire (None for nodes with several wires)."""
+    if len(n["edges"]) != 1:
+        return None
+    _, near, far = eng.edge_far(graph, n["edges"][0], n["id"])
+    return eng.unit((far[0] - near[0], far[1] - near[1]))
+
+
+def assign_node_identities(ext: dict, cfg: eng.EngineConfig, scfg: "SegmentConfig") -> None:
+    """Structural IDs for boundary nodes (junction IDs come from Script 1's depth-1 tracing).
+
+    Names are chosen with global ownership: all node / text candidates are ranked and one
+    text object names at most one node, so a neighbour's name is never reused.
+    """
     texts = ext["texts"]
     tindex = eng.build_text_index(texts, numeric_only=False)
-    nodes = ext["graph"]["nodes"]
+    graph = ext["graph"]
+    nodes = graph["nodes"]
+    cands = []
     for n in nodes:
         n.setdefault("structural_id", None)
         n["name"] = None
         n["name_text_id"] = None
         n["name_confidence"] = 0.0
-        kind = n["kind"]
-        if kind in ("terminal", "open"):
-            cands = name_candidates(n["point"], texts, tindex, cfg.terminal_text_radius)
-            if cands:
-                d, t = cands[0]
-                n["name"], n["name_text_id"] = t["norm"], t["id"]
-                n["name_confidence"] = eng.rnd(max(0.2, 1.0 - d / (2 * cfg.terminal_text_radius)), 3)
-                if kind == "open":
-                    n["kind"] = "terminal"      # an identifier next to a wire end names a terminal
-            else:
-                t = weak_name(n["point"], texts, tindex, 12.0)
-                if t is not None:
-                    n["name"], n["name_text_id"], n["name_confidence"] = t["norm"], t["id"], 0.3
-                    n["kind"] = "terminal"
-        elif kind == "element":
+        if n["kind"] in ("terminal", "open"):
+            r = cfg.terminal_text_radius
+            for sc, t in name_candidates(n["point"], texts, tindex, r, scfg=scfg, inward=_inward(graph, n)):
+                cands.append((sc, n["id"], t["id"], t, r))
+        elif n["kind"] == "element":
             r = cfg.element_text_radius + (n["symbol"]["outer_diameter"] / 2.0 if n.get("symbol") else 0.0)
-            cands = name_candidates(n["point"], texts, tindex, r)
-            if cands:
-                d, t = cands[0]
-                n["name"], n["name_text_id"] = t["norm"], t["id"]
-                n["name_confidence"] = eng.rnd(max(0.2, 1.0 - d / (2 * r)), 3)
+            for sc, t in name_candidates(n["point"], texts, tindex, r, scfg=scfg):
+                cands.append((sc, n["id"], t["id"], t, r))
+    cands.sort(key=lambda c: (c[0], c[1], c[2]))
+    used_t, named = set(), set()
+    for sc, nid, tid, t, r in cands:
+        if nid in named or tid in used_t:
+            continue
+        named.add(nid)
+        used_t.add(tid)
+        n = nodes[nid]
+        n["name"], n["name_text_id"] = t["norm"], tid
+        n["name_confidence"] = eng.rnd(max(0.2, 1.0 - sc / (2 * r)), 3)
+        if n["kind"] == "open":
+            n["kind"] = "terminal"              # an identifier next to a wire end names a terminal
+    for n in nodes:
+        if n["kind"] in ("terminal", "open") and n["name"] is None:
+            t = weak_name(n["point"], texts, tindex, scfg.weak_name_radius)
+            if t is not None and t["id"] not in used_t:
+                used_t.add(t["id"])
+                n["name"], n["name_text_id"], n["name_confidence"] = t["norm"], t["id"], 0.3
+                n["kind"] = "terminal"
     for n in nodes:
         kind = n["kind"]
         if n["name"]:
@@ -237,7 +309,23 @@ def assign_node_identities(ext: dict, cfg: eng.EngineConfig) -> None:
 # Segment tracing
 # ---------------------------------------------------------------------------
 
-def trace_segments(graph: dict) -> List[dict]:
+def simplify_polyline(pts: List[Tuple[float, float]], collinear_deg: float) -> List[Tuple[float, float]]:
+    """Drop vertices where the route does not bend (segmentation artefacts, pass points on a
+    straight run).  Real bends stay; the order of points is preserved."""
+    if len(pts) <= 2:
+        return pts
+    out = [pts[0]]
+    for i in range(1, len(pts) - 1):
+        a, b, c = out[-1], pts[i], pts[i + 1]
+        u, v = eng.unit((b[0] - a[0], b[1] - a[1])), eng.unit((c[0] - b[0], c[1] - b[1]))
+        if u[0] * v[0] + u[1] * v[1] >= math.cos(math.radians(collinear_deg)):
+            continue
+        out.append(b)
+    out.append(pts[-1])
+    return out
+
+
+def trace_segments(graph: dict, collinear_deg: float = 0.5) -> List[dict]:
     """Follow every boundary-to-boundary route through degree-2 points."""
     nodes, edges = graph["nodes"], graph["edges"]
     boundary = {n["id"] for n in nodes if n["kind"] in eng.BOUNDARY_KINDS}
@@ -269,7 +357,7 @@ def trace_segments(graph: dict) -> List[dict]:
                 pts[-1] = far_pt
                 break
             cur, eid = far, nxt[0]
-        return {"start_node": start, "end_node": gpts[-1], "polyline": clean_polyline(pts),
+        return {"start_node": start, "end_node": gpts[-1], "polyline": simplify_polyline(clean_polyline(pts), collinear_deg),
                 "graph_points": gpts, "edge_ids": eids, "vector_line_ids": wire_ids}
 
     for nid in sorted(boundary):
@@ -295,8 +383,7 @@ def build_station_index(ext: dict, scfg: SegmentConfig) -> dict:
     for i, c in enumerate(circles):
         circ.insert(i, c["center"][0], c["center"][1], c["center"][0], c["center"][1])
     cand = [o for o in ext["vectors"]["other_lines"]
-            if not o.get("dashed") and o["width"] >= scfg.station_line_min_width
-            and eng.dist(o["p0"], o["p1"]) <= scfg.station_line_max_length]
+            if eng.is_significant_line(o, ext["cfg"]) and eng.dist(o["p0"], o["p1"]) <= scfg.station_line_max_length]
     for i, o in enumerate(cand):
         lines.insert(i, o["p0"][0], o["p0"][1], o["p1"][0], o["p1"][1])
     return {"circles": circles, "circle_grid": circ, "lines": cand, "line_grid": lines}
@@ -318,7 +405,7 @@ def detect_stations(poly: List[Tuple[float, float]], sindex: dict, scfg: Segment
             seen_c.add(ci)
             c = sindex["circles"][ci]
             d, sv, _, foot = project_on_polyline(c["center"], poly)
-            if d <= scfg.station_tol and 1.0 < sv < L - 1.0:
+            if d <= scfg.station_tol and scfg.end_margin < sv < L - scfg.end_margin:
                 out.append({"s": sv, "point": foot, "kind": "breakpoint", "source": c["id"]})
         u = eng.unit((q[0] - p[0], q[1] - p[1]))
         for li in sindex["line_grid"].query(x0, y0, x1, y1):
@@ -332,12 +419,12 @@ def detect_stations(poly: List[Tuple[float, float]], sindex: dict, scfg: Segment
                 continue
             seen_l.add((li, id(p)))
             d, sv, _, foot = project_on_polyline(hit, poly)
-            if 1.0 < sv < L - 1.0:
+            if scfg.end_margin < sv < L - scfg.end_margin:
                 out.append({"s": sv, "point": foot, "kind": "line", "source": o["id"]})
     out.sort(key=lambda x: x["s"])
     merged: List[dict] = []
     for st in out:
-        if merged and st["s"] - merged[-1]["s"] < 2.0:
+        if merged and st["s"] - merged[-1]["s"] < scfg.station_merge:
             continue
         merged.append(st)
     return merged
@@ -365,8 +452,9 @@ def _union_bbox(boxes: List[Sequence[float]]) -> Tuple[float, float, float, floa
     return (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
-def group_annotations(texts: List[dict]) -> List[dict]:
+def group_annotations(texts: List[dict], scfg: Optional["SegmentConfig"] = None) -> List[dict]:
     """Group annotation keyword texts with their captions (CLAMP above a MARKER oval, ...)."""
+    scfg = scfg or SegmentConfig()
     kw_texts = [t for t in texts if eng.annotation_keyword(t["norm"])]
     primaries = [t for t in kw_texts if eng.annotation_keyword(t["norm"]) in eng.ANNOTATION_INNER_WORDS]
     used = set()
@@ -374,20 +462,29 @@ def group_annotations(texts: List[dict]) -> List[dict]:
     tindex = eng.build_text_index(texts, numeric_only=False)
     for p in primaries:
         d = p["dir"]
-        up = (d[1], -d[0])                       # text "up" direction in the displayed frame
         pw = abs(d[0]) * (p["bbox"][2] - p["bbox"][0]) + abs(d[1]) * (p["bbox"][3] - p["bbox"][1])
+        r = scfg.caption_max + pw
+        near = [texts[ti] for ti in tindex.query(p["center"][0] - r, p["center"][1] - r,
+                                                  p["center"][0] + r, p["center"][1] + r)]
         captions = []
-        r = 14.0 + pw
-        for ti in tindex.query(p["center"][0] - r, p["center"][1] - r, p["center"][0] + r, p["center"][1] + r):
-            t = texts[ti]
-            if t["id"] == p["id"] or t["id"] in used:
-                continue
-            vx, vy = t["center"][0] - p["center"][0], t["center"][1] - p["center"][1]
-            h = vx * up[0] + vy * up[1]
-            a = vx * d[0] + vy * d[1]
-            tw = abs(d[0]) * (t["bbox"][2] - t["bbox"][0]) + abs(d[1]) * (t["bbox"][3] - t["bbox"][1])
-            if 2.0 < h < 14.0 and abs(a) <= (pw + tw) / 2.0 + 2.0:
-                captions.append((h, t))
+        # captions sit above the keyword in its reading frame; vertical text may be written
+        # in either direction, so for vertical text the opposite side is tried when the first
+        # finds nothing (horizontal text reads one way only)
+        for sign in ((1.0, -1.0) if abs(d[1]) > abs(d[0]) else (1.0,)):
+            up = (sign * d[1], -sign * d[0])
+            for t in near:
+                if t["id"] == p["id"] or t["id"] in used:
+                    continue
+                vx, vy = t["center"][0] - p["center"][0], t["center"][1] - p["center"][1]
+                h = vx * up[0] + vy * up[1]
+                a = vx * d[0] + vy * d[1]
+                tw = abs(d[0]) * (t["bbox"][2] - t["bbox"][0]) + abs(d[1]) * (t["bbox"][3] - t["bbox"][1])
+                if scfg.caption_min < h < scfg.caption_max and abs(a) <= (pw + tw) / 2.0 + scfg.caption_min \
+                        and eng.annotation_keyword(t["norm"]) not in eng.ANNOTATION_INNER_WORDS \
+                        and not eng.is_generic_size(t["norm"]):      # 2M / 8M belong to terminals
+                    captions.append((h, t))
+            if captions:
+                break
         captions.sort(key=lambda x: x[0])
         cap_texts = [t for _, t in captions]
         for t in cap_texts:
@@ -412,16 +509,19 @@ def group_annotations(texts: List[dict]) -> List[dict]:
 def attach_annotations(ext: dict, segments: List[dict], sidx: "SegmentIndex",
                        scfg: SegmentConfig) -> Tuple[List[dict], List[dict]]:
     """Find where each annotation's leader touches a wire, then the owning segment."""
-    groups = group_annotations(ext["texts"])
+    groups = group_annotations(ext["texts"], scfg)
     by_drawing: Dict[int, List[dict]] = defaultdict(list)
-    for o in ext["vectors"]["other_lines"]:
-        if o.get("dashed") or not (scfg.leader_min_width <= o["width"] <= scfg.leader_max_width):
+    for o in ext["vectors"]["other_lines"]:            # leaders: any significant non-wire line
+        if not eng.is_significant_line(o, ext["cfg"]):
             continue
         by_drawing[o["drawing_index"]].append(o)
     leaders = []
     lgrid = eng.GridIndex(25.0)
     for di, segs in sorted(by_drawing.items()):
         pts = [p for o in segs for p in (o["p0"], o["p1"])]
+        ends = Counter((round(p[0], 2), round(p[1], 2)) for p in pts)
+        if len(segs) >= 3 and all(n % 2 == 0 for n in ends.values()):
+            continue                                    # closed outline (box, oval): not a leader
         leaders.append(pts)
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
         lgrid.insert(len(leaders) - 1, min(xs), min(ys), max(xs), max(ys))
@@ -438,7 +538,7 @@ def attach_annotations(ext: dict, segments: List[dict], sidx: "SegmentIndex",
             if hd > r:
                 continue
             for foot_cand in pts:
-                if eng.dist(foot_cand, head) < 1.0:
+                if eng.dist(foot_cand, head) < scfg.end_margin:
                     continue
                 ns = sidx.nearest(foot_cand, scfg.leader_wire_tol)
                 if ns and (best is None or hd < best[0]):
@@ -473,7 +573,7 @@ def detect_inline_components(ext: dict, segments: List[dict], sidx: "SegmentInde
     tindex = eng.build_text_index(texts, numeric_only=False)
     out = []
     for sh in ext["vectors"]["shapes"]:
-        if sh["dashed"] or sh["width"] < 0.45:
+        if sh["dashed"]:                       # any pen: closed outline crossed by a wire and named
             continue
         x0, y0, x1, y1 = sh["bbox"]
         size = max(x1 - x0, y1 - y0)
@@ -486,14 +586,14 @@ def detect_inline_components(ext: dict, segments: List[dict], sidx: "SegmentInde
             crossed = False
             for p, q in zip(poly, poly[1:]):
                 d, _ = eng.point_segment_distance(c, p, q)
-                if d <= min(x1 - x0, y1 - y0) / 2.0 + 0.5:
+                if d <= min(x1 - x0, y1 - y0) / 2.0 + scfg.end_margin / 2.0:
                     crossed = True
                     break
             if not crossed:
                 continue
             d, sv, _, foot = project_on_polyline(c, poly)
             L = polyline_length(poly)
-            if sv < 3.0 or sv > L - 3.0:
+            if sv < 3.0 * scfg.end_margin or sv > L - 3.0 * scfg.end_margin:
                 continue
             r = scfg.component_text_radius
             best = None
@@ -553,10 +653,11 @@ def absorb_end_components(ext: dict, segments: List[dict], components: List[dict
 
 def initial_label_assignment(ext: dict, segments: List[dict], cfg: eng.EngineConfig,
                              scfg: SegmentConfig) -> Dict[int, List[dict]]:
-    """Each numeric text goes to the nearest orientation-compatible wire piece (either side).
+    """Each numeric text goes to the nearest orientation-compatible wire piece.
 
-    This is deliberately the simple first-pass association; Script 3 replaces it by
-    strict side rules and global one-to-one text ownership.
+    Either side is allowed, the side found by calibration being preferred.  This is the
+    simple first-pass association; Script 3 replaces it by strict side rules and global
+    one-to-one text ownership.
     """
     texts = ext["texts"]
     tindex = eng.build_text_index(texts, numeric_only=True)
@@ -585,8 +686,11 @@ def initial_label_assignment(ext: dict, segments: List[dict], cfg: eng.EngineCon
                     d, tp = eng.point_segment_distance((cx, cy), a, b)
                     if d > scfg.initial_label_max_dist:
                         continue
+                    conv = cfg.side_h if orient == "horizontal" else cfg.side_v
+                    raw = (cy - (a[1] + b[1]) / 2) if orient == "horizontal" else (cx - (a[0] + b[0]) / 2)
+                    rank = d if (conv == 0 or conv is None or conv * raw > 0) else d + 0.5 * scfg.initial_label_max_dist
                     key = t["id"]
-                    cand = (d, seg["segment_index"], pi, cum + tp * L, ti)
+                    cand = (rank, seg["segment_index"], pi, cum + tp * L, ti)
                     if key not in best or cand[0] < best[key][0]:
                         best[key] = cand
             cum += L
@@ -602,13 +706,13 @@ def initial_label_assignment(ext: dict, segments: List[dict], cfg: eng.EngineCon
 # Build segment JSON for one PDF
 # ---------------------------------------------------------------------------
 
-def endpoint_record(node: dict, wire_end: Sequence[float], annotations: List[dict]) -> dict:
+def endpoint_record(node: dict, wire_end: Sequence[float], annotations: List[dict], D) -> dict:
     rec = {
         "type": node["kind"],
         "structural_id": node.get("structural_id"),
         "node_id": f"N{node['id']}",
-        "point": eng.rpt(wire_end),
-        "node_point": eng.rpt(node["point"]),
+        "point": D(wire_end),
+        "node_point": D(node["point"]),
         "symbol_id": node.get("symbol_id"),
         "symbol_kind": node.get("symbol_kind"),
     }
@@ -627,16 +731,27 @@ def segment_key(a: str, b: str) -> str:
     return f"SEG[{x}<->{y}]"
 
 
-def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig, scfg: SegmentConfig) -> Tuple[dict, dict]:
-    """Return (segments JSON dict, extraction dict) for one PDF page."""
+def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig,
+                          scfg: Optional[SegmentConfig] = None) -> Tuple[dict, dict]:
+    """Return (segments JSON dict, extraction dict) for one PDF page.
+
+    The drawing is calibrated first (Script 1); every distance used here is then scaled
+    to that PDF's own units.  Work happens in the analysis frame; all coordinates written
+    to the JSON are displayed-page coordinates.
+    """
     doc = None
     try:
         doc, page = eng.open_pdf_page(pdf, page_no)
         ext = eng.extract_page(page, cfg)
+        cfg = ext["cfg"]                                   # calibrated for this PDF
+        scfg = scfg or SegmentConfig.scaled(cfg)
         info = eng.source_pdf_info(pdf, page)
-        assign_node_identities(ext, cfg)
+
+        def D(p):                                          # analysis frame -> displayed page
+            return eng.rpt(eng.to_display_pt(ext, p))
+        assign_node_identities(ext, cfg, scfg)
         graph = ext["graph"]
-        segs = trace_segments(graph)
+        segs = trace_segments(graph, scfg.collinear_deg)
         sidx = SegmentIndex(segs)
         station_index = build_station_index(ext, scfg)
         annotations, node_annotations = attach_annotations(ext, segs, sidx, scfg)
@@ -658,22 +773,22 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig, scfg: 
         for s in segs:
             si = s["segment_index"]
             sn, en = nodes[s["start_node"]], nodes[s["end_node"]]
-            start = endpoint_record(sn, s["polyline"][0], node_ann.get(sn["id"], []))
-            end = endpoint_record(en, s["polyline"][-1], node_ann.get(en["id"], []))
+            start = endpoint_record(sn, s["polyline"][0], node_ann.get(sn["id"], []), D)
+            end = endpoint_record(en, s["polyline"][-1], node_ann.get(en["id"], []), D)
             names = {start.get("name"), end.get("name")}
             items = []
             for w in labels.get(si, []):
-                items.append(dict(w, s=eng.rnd(w["s"])))
+                items.append(dict(w, s=eng.rnd(w["s"]), point=D(w["point"])))
             for a in seg_ann.get(si, []):
                 items.append({"kind": "ELEMENT", "value": a["token"], "s": eng.rnd(a["s"]), "annotation": True,
                               "caption": a["caption"], "text_ids": a["text_ids"],
-                              "attach_method": a["attach_method"], "point": eng.rpt(a["attach_point"])})
+                              "attach_method": a["attach_method"], "point": D(a["attach_point"])})
             for c in seg_comp.get(si, []):
                 if c["token"] in names:
                     continue
                 items.append({"kind": "ELEMENT", "value": c["token"], "s": eng.rnd(c["s"]), "annotation": False,
                               "component": True, "text_ids": c["text_ids"], "shape_id": c["shape_id"],
-                              "point": eng.rpt(c["attach_point"])})
+                              "point": D(c["attach_point"])})
             items.sort(key=lambda it: (it["s"], 0 if it["kind"] == "WIRE" else 1))
             sequence = [f"{it['kind']}:{it['value']}" for it in items]
             poly = s["polyline"]
@@ -682,12 +797,12 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig, scfg: 
                 "segment_key": segment_key(start["structural_id"], end["structural_id"]),
                 "start": start,
                 "end": end,
-                "polyline": [eng.rpt(p) for p in poly],
+                "polyline": [D(p) for p in poly],
                 "length": eng.rnd(polyline_length(poly)),
                 "graph_points": [f"N{g}" for g in s["graph_points"]],
                 "edge_ids": s["edge_ids"],
                 "vector_line_ids": s["vector_line_ids"],
-                "stations": [{"s": eng.rnd(st["s"]), "point": eng.rpt(st["point"]), "kind": st["kind"],
+                "stations": [{"s": eng.rnd(st["s"]), "point": D(st["point"]), "kind": st["kind"],
                               "source": st["source"]} for st in detect_stations(poly, station_index, scfg)],
                 "items": items,
                 "sequence": sequence,
@@ -699,7 +814,7 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig, scfg: 
             if n["kind"] not in eng.BOUNDARY_KINDS:
                 continue
             node_json.append({"node_id": f"N{n['id']}", "kind": n["kind"], "structural_id": n.get("structural_id"),
-                              "point": eng.rpt(n["point"]), "degree": len(n["edges"]),
+                              "point": D(n["point"]), "degree": len(n["edges"]),
                               "symbol_id": n.get("symbol_id"), "symbol_kind": n.get("symbol_kind"),
                               "name": n.get("name"), "name_text_id": n.get("name_text_id"),
                               "depth1_labels": n.get("depth1_labels"),
@@ -714,6 +829,7 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig, scfg: 
             "coordinate_frame": "displayed_page",
             "source_pdf": info,
             "config": {"engine": cfg.to_dict(), "segments": scfg.to_dict()},
+            "profile": ext["profile"],
             "wire_width_used": ext["vectors"]["wire_width"],
             "summary": {
                 "segments": len(out_segments),
@@ -729,10 +845,13 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig, scfg: 
                 "border_texts_excluded": ext["border"]["border_texts_excluded"],
                 "border_lines_excluded": ext["border"]["border_lines_excluded"],
                 "table_components_dropped": len(ext["border"]["table_components_dropped"]),
+                "bridged_gaps": graph.get("bridged_gaps", 0),
             },
             "sheet_border": ext["border"],
             "nodes": node_json,
-            "junctions": ext["junctions"],
+            "junctions": [dict(j, point=D(j["point"]), directions=[dict(d, path=[D(p) for p in d["path"]])
+                                                                   for d in j["directions"]])
+                          for j in ext["junctions"]],
             "segments": out_segments,
         }
         return data, ext
@@ -875,14 +994,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         ap.error("--zoom must be positive")
     try:
         cfg = eng.engine_config_from_args(args)
-        scfg = SegmentConfig(initial_label_max_dist=cfg.label_max_side)
         os.makedirs(args.out, exist_ok=True)
         written = []
         results = {}
         for tag, pdf in (("a", args.pdf_a), ("b", args.pdf_b)):
             if not pdf:
                 continue
-            data, _ = build_segments_for_pdf(pdf, args.page, cfg, scfg)
+            data, _ = build_segments_for_pdf(pdf, args.page, cfg)
             p = os.path.join(args.out, f"pdf_{tag}_segments.json")
             write_json(p, data)
             written.append(p)
@@ -896,6 +1014,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"   segments {s['segments']}, junctions {s['junctions']}, nodes {s['node_kinds']}, "
                   f"annotations {s['annotations_on_segments']}+{s['annotations_on_nodes']} (node), "
                   f"inline components {s['inline_components']}")
+            pr = data["profile"]
+            print(f"   calibration: wire pen {pr['wire_widths']}, text unit {pr['text_unit']}, dot {pr['dot_unit']}, "
+                  f"de-skew {pr['deskew_deg']} deg, label side h={pr['side_h']} v={pr['side_v']}, "
+                  f"label max {pr['label_max_side']}, endpoint tol {pr['endpoint_tol']}")
             print(f"   sheet border: {s['sheet_frames']} frame(s); excluded {s['border_lines_excluded']} line(s), "
                   f"{s['border_texts_excluded']} margin text(s), {s['table_components_dropped']} table component(s)")
         if "a" in results and "b" in results:

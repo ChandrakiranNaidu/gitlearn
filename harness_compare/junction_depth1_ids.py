@@ -60,7 +60,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
@@ -159,12 +159,34 @@ def numeric_sort_key(v: str):
 # Configuration
 # ---------------------------------------------------------------------------
 
+# Values measured on the reference drawing the rules were tuned on.  Every distance
+# threshold below is stored for that drawing and rescaled per PDF by derive_config()
+# from the units measured on the PDF itself (see calibrate_profile()).
+REF_TEXT_UNIT = 5.39      # median font size of numeric labels (pt)
+REF_WIRE_UNIT = 0.539     # harness wire stroke width (pt)
+REF_DOT_UNIT = 2.16       # junction dot outer diameter (pt)
+REF_LABEL_DISTANCE = 5.04 # median distance of a wire number's centre from its wire (pt)
+
+
 @dataclass
 class EngineConfig:
+    # Calibration (None = measured per PDF)
+    wire_width: Optional[float] = None       # explicit harness wire stroke width, else auto
+    wire_widths: Optional[Tuple[float, ...]] = None
+    label_max_side_override: Optional[float] = None
+    side_h: Optional[int] = None             # +1 labels below horizontal wires, -1 above, 0 on the wire
+    side_v: Optional[int] = None             # +1 labels right of vertical wires, -1 left, 0 on the wire
+    deskew: bool = True
+    text_unit: float = REF_TEXT_UNIT
+    wire_unit: float = REF_WIRE_UNIT
+    dot_unit: float = REF_DOT_UNIT
+    layout_unit: float = REF_TEXT_UNIT
     # Wire extraction
-    wire_width: Optional[float] = 0.539      # None -> auto-detect
     wire_width_tol: float = 0.03
     min_wire_length: float = 0.25
+    significant_min_width: float = 0.22     # non-wire lines thinner AND shorter than this are texture
+    significant_min_length: float = 3.0
+    gap_bridge_max: float = 6.0
     # Graph construction
     endpoint_merge_tol: float = 0.75
     split_tol: float = 0.5
@@ -183,6 +205,7 @@ class EngineConfig:
     label_max_side: float = 10.5            # ... and at most this far
     label_overlap_tol: float = 0.6          # text box may overlap the wire by at most this
     projection_margin: float = 2.0          # text centre may project this far beyond a piece end
+    inline_max_side: float = 3.0            # labels printed on the wire (side convention 0)
     centre_weight: float = 0.5
     # Depth-1 tracing
     trace_max_length: float = 2500.0
@@ -396,7 +419,7 @@ def _split_span_chars(chars: List[dict], d: Sequence[float], size: float, gap_fa
     return groups
 
 
-def extract_text_objects(page, M, cfg: EngineConfig) -> List[dict]:
+def extract_text_objects(page, M, cfg: EngineConfig, visible: Optional["fitz.Rect"] = None) -> List[dict]:
     """Extract text objects (word groups) in the displayed frame.
 
     Characters are read without clipping and a whole word is kept when any part of it
@@ -405,7 +428,7 @@ def extract_text_objects(page, M, cfg: EngineConfig) -> List[dict]:
     """
     flags = fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_PRESERVE_LIGATURES
     raw = page.get_text("rawdict", flags=flags, clip=fitz.INFINITE_RECT())
-    visible = page.rect
+    visible = visible if visible is not None else page.rect
     out: List[dict] = []
     tol = math.sin(math.radians(cfg.text_axis_tol_deg))
     for block in raw.get("blocks", []):
@@ -524,7 +547,7 @@ def _circle_from_items(view_items, cfg: EngineConfig) -> Optional[Tuple[Tuple[fl
     xs = [p[0] for p in samples]
     ys = [p[1] for p in samples]
     w, h = max(xs) - min(xs), max(ys) - min(ys)
-    if w <= 0.1 or h <= 0.1:
+    if w <= 0.02 * cfg.text_unit or h <= 0.02 * cfg.text_unit:
         return None
     if abs(w / h - 1.0) > 0.2:
         return None
@@ -575,12 +598,13 @@ def clip_segment(a: Sequence[float], b: Sequence[float], r) -> Optional[Tuple[Tu
 # Sheet border: drawing frame, zone markers, title-block tables
 # ---------------------------------------------------------------------------
 
-def _merge_collinear(lines: List[Tuple[float, float, float]]) -> List[Tuple[float, float, float]]:
+def _merge_collinear(lines: List[Tuple[float, float, float]], ctol: float = 0.6,
+                     gap: float = 2.0) -> List[Tuple[float, float, float]]:
     """(lo, hi, c) axis-aligned lines -> merged extents per coordinate c, longest first."""
     out: List[List[float]] = []
     for lo, hi, c in sorted(lines, key=lambda l: (l[2], l[0])):
         for m in out:
-            if abs(m[2] - c) <= 0.6 and lo <= m[1] + 2.0 and hi >= m[0] - 2.0:
+            if abs(m[2] - c) <= ctol and lo <= m[1] + gap and hi >= m[0] - gap:
                 m[0], m[1] = min(m[0], lo), max(m[1], hi)
                 break
         else:
@@ -602,6 +626,8 @@ def detect_sheet_border(page, M, drawings: list, text_centres: List[Tuple[float,
     W, H = page.rect.width, page.rect.height
     if not cfg.border_detection:
         return {"frames": [], "inner": None}
+    U = cfg.layout_unit
+    ax_tol = max(0.5 * U / REF_TEXT_UNIT, 0.05)
     rects, hs, vs = [], [], []
     for d in drawings:
         if "s" not in (d.get("type") or "") or _is_white(d.get("color")):
@@ -609,7 +635,7 @@ def detect_sheet_border(page, M, drawings: list, text_centres: List[Tuple[float,
         for kind, pts in _path_items_view(d.get("items", []), M):
             if kind == "poly":
                 segs = list(zip(pts, pts[1:]))
-                if all(abs(a[0] - b[0]) <= 0.5 or abs(a[1] - b[1]) <= 0.5 for a, b in segs):
+                if all(abs(a[0] - b[0]) <= ax_tol or abs(a[1] - b[1]) <= ax_tol for a, b in segs):
                     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
                     rects.append((min(xs), min(ys), max(xs), max(ys)))
             elif kind == "l":
@@ -617,11 +643,11 @@ def detect_sheet_border(page, M, drawings: list, text_centres: List[Tuple[float,
             else:
                 continue
             for a, b in segs:
-                if abs(a[1] - b[1]) <= 0.5 and abs(a[0] - b[0]) >= 0.5 * W:
+                if abs(a[1] - b[1]) <= ax_tol and abs(a[0] - b[0]) >= 0.5 * W:
                     hs.append((min(a[0], b[0]), max(a[0], b[0]), (a[1] + b[1]) / 2))
-                elif abs(a[0] - b[0]) <= 0.5 and abs(a[1] - b[1]) >= 0.5 * H:
+                elif abs(a[0] - b[0]) <= ax_tol and abs(a[1] - b[1]) >= 0.5 * H:
                     vs.append((min(a[1], b[1]), max(a[1], b[1]), (a[0] + b[0]) / 2))
-    hs, vs = _merge_collinear(hs)[:16], _merge_collinear(vs)[:16]
+    hs, vs = _merge_collinear(hs, 0.12 * U, 0.4 * U)[:16], _merge_collinear(vs, 0.12 * U, 0.4 * U)[:16]
     t = cfg.border_corner_tol
     for top in hs:
         for bot in hs:
@@ -650,11 +676,12 @@ def detect_sheet_border(page, M, drawings: list, text_centres: List[Tuple[float,
             inside = sum(1 for c in text_centres if r[0] <= c[0] <= r[2] and r[1] <= c[1] <= r[3])
             if inside < 0.75 * len(text_centres):
                 continue
-        if any(all(abs(r[k] - f[k]) <= 1.0 for k in range(4)) for f in frames):
+        if any(all(abs(r[k] - f[k]) <= 0.2 * U for k in range(4)) for f in frames):
             continue
         frames.append(r)
     frames.sort(key=lambda r: -(r[2] - r[0]) * (r[3] - r[1]))
-    return {"frames": [tuple(rnd(v) for v in f) for f in frames], "inner": frames[-1] if frames else None}
+    return {"frames": [tuple(rnd(v) for v in f) for f in frames], "inner": frames[-1] if frames else None,
+            "band_tol": cfg.border_band_tol, "text_tol": 0.1 * U}
 
 
 def _outside(p: Sequence[float], r: Sequence[float], tol: float) -> bool:
@@ -665,10 +692,11 @@ def _inside(p: Sequence[float], r: Sequence[float], tol: float) -> bool:
     return r[0] + tol < p[0] < r[2] - tol and r[1] + tol < p[1] < r[3] - tol
 
 
-def is_border_segment(a: Sequence[float], b: Sequence[float], border: Optional[dict], tol: float = 1.0) -> bool:
+def is_border_segment(a: Sequence[float], b: Sequence[float], border: Optional[dict], tol: Optional[float] = None) -> bool:
     """True for a frame edge, or a line in the margin band outside the drawing area (zone ticks)."""
     if not border or not border.get("frames"):
         return False
+    tol = border.get("band_tol", 1.0) if tol is None else tol
     for x0, y0, x1, y1 in border["frames"]:
         for e0, e1 in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x0, y1), (x1, y1)), ((x0, y0), (x0, y1))):
             if point_segment_distance(a, e0, e1)[0] <= tol and point_segment_distance(b, e0, e1)[0] <= tol:
@@ -678,46 +706,235 @@ def is_border_segment(a: Sequence[float], b: Sequence[float], border: Optional[d
     return _outside(mid, inner, tol) and not _inside(a, inner, tol) and not _inside(b, inner, tol)
 
 
-def is_border_text(t: dict, border: Optional[dict], tol: float = 0.5) -> bool:
+def is_border_text(t: dict, border: Optional[dict], tol: Optional[float] = None) -> bool:
     """Zone numbers / letters printed in the margin band outside the drawing area."""
-    return bool(border and border.get("inner")) and _outside(t["center"], border["inner"], tol)
+    if not (border and border.get("inner")):
+        return False
+    return _outside(t["center"], border["inner"], border.get("text_tol", 0.5) if tol is None else tol)
 
 
-def auto_wire_width(page, M, drawings: Optional[list] = None, border: Optional[dict] = None) -> Optional[float]:
-    """Pick the stroke width carrying the largest total length of long black lines (border excluded)."""
-    totals: Dict[float, float] = defaultdict(float)
-    for d in (drawings if drawings is not None else page.get_drawings()):
-        if "s" not in (d.get("type") or "") or _is_dashed(d.get("dashes")) or _is_white(d.get("color")):
-            continue
-        w = round(float(d.get("width") or 0.0), 3)
-        if w < 0.2:
+def _solid_stroke(d: dict) -> bool:
+    return "s" in (d.get("type") or "") and not _is_dashed(d.get("dashes")) and not _is_white(d.get("color"))
+
+
+def dominant_axis_angle(drawings: list, M, page) -> Tuple[float, float]:
+    """Angle (deg) by which the drawing is rotated off the page axes, and its support.
+
+    Length-weighted histogram of long straight solid lines, folded modulo 90 degrees.  A
+    drawing whose lines are already horizontal / vertical returns 0.
+    """
+    min_len = 0.01 * max(page.rect.width, page.rect.height)
+    hist = [0.0] * 180                          # 0.5 degree bins over [-45, 45)
+    samples = []
+    for d in drawings:
+        if not _solid_stroke(d):
             continue
         for it in d.get("items", []):
-            if it[0] == "l":
-                a, b = to_view(M, it[1]), to_view(M, it[2])
-                L = dist(a, b)
-                if L >= 8.0 and not is_border_segment(a, b, border):
-                    totals[w] += L
-    if not totals:
-        return None
-    return max(totals.items(), key=lambda kv: kv[1])[0]
+            if it[0] != "l":
+                continue
+            a, b = to_view(M, it[1]), to_view(M, it[2])
+            L = dist(a, b)
+            if L < min_len:
+                continue
+            ang = ((math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) + 45.0) % 90.0) - 45.0
+            hist[min(179, int((ang + 45.0) * 2))] += L
+            samples.append((ang, L))
+    total = sum(hist)
+    if total <= 0:
+        return 0.0, 0.0
+    sm = [hist[i - 1] + hist[i] + hist[(i + 1) % 180] for i in range(180)]
+    peak = max(range(180), key=lambda i: sm[i])
+    centre = peak / 2.0 - 45.0 + 0.25
+    near = [(a if abs(a - centre) < 45 else a - math.copysign(90, a), L) for a, L in samples
+            if min(abs(a - centre), 90 - abs(a - centre)) <= 1.0]
+    theta = sum(a * L for a, L in near) / max(1e-9, sum(L for _, L in near)) if near else centre
+    support = sum(L for a, L in samples if min(abs(a - theta), 90 - abs(a - theta)) <= 2.0) / total
+    return theta, support
+
+
+def view_transform(page, M0, theta: float):
+    """Analysis frame = displayed frame rotated by -theta about the page centre.
+
+    Returns (M, to_display, view_rect): M maps unrotated PDF coordinates into the analysis
+    frame, to_display maps analysis coordinates back to the displayed page.
+    """
+    if abs(theta) < 1e-9:
+        return M0, fitz.Matrix(1, 0, 0, 1, 0, 0), fitz.Rect(page.rect)
+    cx, cy = page.rect.width / 2.0, page.rect.height / 2.0
+    c, s_ = math.cos(math.radians(theta)), math.sin(math.radians(theta))
+    R = fitz.Matrix(1, 0, 0, 1, -cx, -cy) * fitz.Matrix(c, -s_, s_, c, 0, 0) * fitz.Matrix(1, 0, 0, 1, cx, cy)
+    view = fitz.Rect()
+    for q in (page.rect.tl, page.rect.tr, page.rect.br, page.rect.bl):
+        view |= q * R
+    return M0 * R, ~R, view
+
+
+def estimate_text_unit(texts: List[dict]) -> float:
+    """Median nominal font size of numeric labels (independent of font metrics / box padding)."""
+    hs = sorted(t["font_size"] for t in texts if t["is_numeric"] and t.get("font_size", 0) > 0)
+    if len(hs) < 3:
+        hs = sorted(t["font_size"] for t in texts if t.get("font_size", 0) > 0)
+    return hs[len(hs) // 2] if hs else REF_TEXT_UNIT
+
+
+def _width_clusters(widths: Dict[float, list]) -> List[Tuple[float, list]]:
+    keys = sorted(widths)
+    clusters: List[List] = []
+    for k in keys:
+        if clusters and k - clusters[-1][0][-1] <= max(0.002, 0.06 * clusters[-1][0][-1]):
+            clusters[-1][0].append(k)
+            clusters[-1][1].extend(widths[k])
+        else:
+            clusters.append([[k], list(widths[k])])
+    out = []
+    for ks, segs in clusters:              # representative width: the one carrying most length
+        w = max(ks, key=lambda k: sum(dist(a, b) for a, b in widths[k]))
+        out.append((w, segs))
+    return out
+
+
+def _filled_dots(drawings: list, M, max_diameter: float) -> List[Tuple[Tuple[float, float], float]]:
+    """Centres and diameters of small filled round paths (junction dot candidates)."""
+    out = []
+    for d in drawings:
+        if "f" not in (d.get("type") or "") or d.get("fill") is None or _is_white(d.get("fill")):
+            continue
+        items = d.get("items", [])
+        if sum(1 for it in items if it[0] == "c") < 2 or not all(it[0] in ("c", "l") for it in items):
+            continue
+        r = fitz.Rect(d["rect"]) * M
+        if 0 < r.width <= max_diameter and r.height > 0 and abs(r.width / r.height - 1.0) < 0.2:
+            out.append((((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0), (r.width + r.height) / 2.0))
+    return out
+
+
+def detect_wire_widths(drawings: list, M, view_rect, texts: List[dict], text_unit: float,
+                       border: Optional[dict]) -> dict:
+    """Harness wire stroke width(s) and the wire-number font size, chosen by evidence.
+
+    For every stroke-width cluster of solid straight lines:
+      * labels   - numeric texts sitting parallel next to its lines (within 3 of their own
+                   text heights, projecting onto the line);
+      * dots     - small filled dots where 3+ of its lines meet (junctions).  Frames, zone
+                   ticks, tables and title blocks never meet at junction dots, so when any
+                   cluster has junction dots, only clusters with dots can be the wire pen.
+    The best cluster is the wire pen and the median font size of its labels is the label
+    text unit (zone numbers, table entries and notes in other fonts do not count).  Further
+    clusters carrying at least a quarter as many labels IN THAT FONT SIZE and a tenth of the
+    long-line length are additional wire pens (e.g. bundles drawn thicker than single wires).
+    """
+    U = text_unit
+    by_width: Dict[float, list] = defaultdict(list)
+    for d in drawings:
+        if not _solid_stroke(d):
+            continue
+        w = round(float(d.get("width") or 0.0), 3)
+        if w <= 0:
+            continue
+        for it in d.get("items", []):
+            if it[0] != "l":
+                continue
+            a, b = to_view(M, it[1]), to_view(M, it[2])
+            if dist(a, b) < 0.3 * U or is_border_segment(a, b, border):
+                continue
+            if not (view_rect.x0 - U <= max(a[0], b[0]) and min(a[0], b[0]) <= view_rect.x1 + U
+                    and view_rect.y0 - U <= max(a[1], b[1]) and min(a[1], b[1]) <= view_rect.y1 + U):
+                continue
+            by_width[w].append((a, b))
+    numeric = [t for t in texts if t["is_numeric"] and t["orientation"] in ("horizontal", "vertical")
+               and t.get("font_size", 0) > 0]
+    dots = _filled_dots(drawings, M, 1.5 * U)
+    stats = []
+    for w, segs in _width_clusters(by_width):
+        idx = GridIndex(30.0)
+        for i, (a, b) in enumerate(segs):
+            idx.insert(i, a[0], a[1], b[0], b[1])
+        hits = []
+        for t in numeric:
+            cx, cy = t["center"]
+            f = t["font_size"]
+            hit = False
+            for i in idx.query(cx - 3 * f, cy - 3 * f, cx + 3 * f, cy + 3 * f):
+                a, b = segs[i]
+                if dist(a, b) < 1.0 * f:            # a label-carrying wire piece is at least a label long
+                    continue
+                dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+                if t["orientation"] == "horizontal" and dy <= 0.1 * dx:
+                    lo, hi, perp = min(a[0], b[0]), max(a[0], b[0]), abs(cy - (a[1] + b[1]) / 2)
+                    along = cx
+                elif t["orientation"] == "vertical" and dx <= 0.1 * dy:
+                    lo, hi, perp = min(a[1], b[1]), max(a[1], b[1]), abs(cx - (a[0] + b[0]) / 2)
+                    along = cy
+                else:
+                    continue
+                if lo - 0.4 * f <= along <= hi + 0.4 * f and perp <= 3 * f:
+                    hit = True
+                    break
+            if hit:
+                hits.append(f)
+        n_dots = 0
+        for c, dia in dots:
+            reach = 0.5 * dia + max(2.0 * w, 0.06 * U)
+            deg = 0
+            for i in idx.query(c[0] - reach, c[1] - reach, c[0] + reach, c[1] + reach):
+                a, b = segs[i]
+                if dist(c, a) <= reach or dist(c, b) <= reach:
+                    deg += 1                        # a line ending at the dot
+                elif point_segment_distance(c, a, b)[0] <= reach:
+                    deg += 2                        # a line passing through the dot
+                if deg >= 3:
+                    n_dots += 1
+                    break
+        long_len = sum(dist(a, b) for a, b in segs if dist(a, b) >= 1.6 * U)
+        stats.append({"width": w, "labels": len(hits), "junction_dots": n_dots, "long_length": rnd(long_len, 1),
+                      "lines": len(segs), "_fonts": sorted(hits)})
+    if not stats:
+        return {"widths": [], "primary": None, "clusters": [], "label_text_unit": None}
+    max_dots = max(c["junction_dots"] for c in stats)
+    pool = [c for c in stats if c["junction_dots"] >= max(3, 0.2 * max_dots)] if max_dots >= 3 else stats
+    best = max(pool, key=lambda c: (c["labels"], c["long_length"]))
+    if best["labels"] < 3:
+        best = max(pool, key=lambda c: c["long_length"])
+    fonts = best["_fonts"]
+    label_unit = fonts[len(fonts) // 2] if len(fonts) >= 5 else None
+    widths = [best["width"]]
+    for c in stats:
+        if c is best:
+            continue
+        same_font = c["labels"] if label_unit is None else \
+            sum(1 for f in c["_fonts"] if abs(f - label_unit) <= 0.15 * label_unit)
+        if same_font >= max(5, 0.25 * best["labels"]) and c["long_length"] >= 0.1 * best["long_length"]:
+            widths.append(c["width"])
+    clusters = [{k: v for k, v in c.items() if k != "_fonts"} for c in sorted(stats, key=lambda c: -c["labels"])]
+    return {"widths": widths, "primary": best["width"], "clusters": clusters, "label_text_unit": label_unit}
+
+
+def _is_wire_width(width: float, cfg: EngineConfig) -> bool:
+    ws = cfg.wire_widths or ((cfg.wire_width,) if cfg.wire_width is not None else ())
+    return any(abs(width - w) <= max(min(cfg.wire_width_tol, 0.15 * w), 0.06 * w) for w in ws)
+
+
+def is_significant_line(o: dict, cfg: EngineConfig) -> bool:
+    """Symbol / leader / tick geometry, as opposed to hatching texture and dashed sleeves."""
+    if o.get("dashed"):
+        return False
+    return o["width"] >= cfg.significant_min_width or dist(o["p0"], o["p1"]) >= cfg.significant_min_length
 
 
 def extract_vectors(page, M, cfg: EngineConfig, drawings: Optional[list] = None,
-                    border: Optional[dict] = None) -> dict:
+                    border: Optional[dict] = None, view_rect=None) -> dict:
     """Extract wires, raw circles, other (non-wire) lines and closed symbol shapes.
 
     Sheet-border lines (frame edges, zone ticks in the margin band) are never wires and
-    never terminal-symbol geometry, whatever their stroke width.
+    never terminal-symbol geometry, whatever their stroke width.  Small closed shapes
+    drawn with the wire pen (terminal boxes) are symbols, not wires.
     """
     drawings = page.get_drawings() if drawings is None else drawings
-    wire_width = cfg.wire_width
-    if wire_width is None:
-        wire_width = auto_wire_width(page, M, drawings, border)
-        if wire_width is None:
-            raise RuntimeError("Could not auto-detect the harness wire stroke width; pass --wire-width.")
-    prect = page.rect
-    margin = 5.0
+    if not (cfg.wire_widths or cfg.wire_width is not None):
+        raise RuntimeError("No harness wire stroke width known; pass --wire-width.")
+    prect = view_rect if view_rect is not None else page.rect
+    margin = cfg.layout_unit
+    U = cfg.layout_unit
 
     def on_page(p) -> bool:
         return (prect.x0 - margin <= p[0] <= prect.x1 + margin) and (prect.y0 - margin <= p[1] <= prect.y1 + margin)
@@ -748,12 +965,17 @@ def extract_vectors(page, M, cfg: EngineConfig, drawings: Optional[list] = None,
                 })
             continue
         segs = _view_segments(view_items)
-        is_wire = stroked and not dashed and abs(width - wire_width) <= cfg.wire_width_tol
         closed = False
-        if len(segs) >= 3 and dist(segs[0][0], segs[-1][1]) <= 0.3:
+        if len(segs) >= 3 and dist(segs[0][0], segs[-1][1]) <= 0.06 * U:
             closed = True
         if any(k == "poly" for k, _ in view_items):
             closed = True
+        is_wire = stroked and not dashed and _is_wire_width(width, cfg)
+        if is_wire and closed and segs:
+            xs = [p[0] for sg in segs for p in (sg[0], sg[1])]
+            ys = [p[1] for sg in segs for p in (sg[0], sg[1])]
+            if max(max(xs) - min(xs), max(ys) - min(ys)) <= 4.0 * U:
+                is_wire = False                    # a small closed outline is a symbol (terminal box)
         for (a, b, ii, kind) in segs:
             if is_border_segment(a, b, border):
                 border_lines += 1
@@ -789,8 +1011,336 @@ def extract_vectors(page, M, cfg: EngineConfig, drawings: Optional[list] = None,
         o["id"] = f"L{i:05d}"
     for i, s in enumerate(shapes):
         s["id"] = f"S{i:04d}"
-    return {"wire_width": wire_width, "wires": wires, "circles_raw": circles,
-            "other_lines": other_lines, "shapes": shapes, "border_lines_excluded": border_lines}
+    return {"wire_width": cfg.wire_width, "wire_widths": list(cfg.wire_widths or [cfg.wire_width]),
+            "wires": wires, "circles_raw": circles, "other_lines": other_lines, "shapes": shapes,
+            "border_lines_excluded": border_lines}
+
+
+# ---------------------------------------------------------------------------
+# Segmentation normalisation
+# ---------------------------------------------------------------------------
+
+def merge_collinear_wires(wires: List[dict], tol: float, angle_tol_deg: float = 1.0) -> List[dict]:
+    """Merge duplicated, overlapping and touching collinear wire pieces into maximal lines.
+
+    One wire drawn as many pieces, in any order or direction, with duplicates or small
+    overlaps / gaps up to tol becomes one straight line.  Junctions, bends and T-joints are
+    re-created later from dots and endpoints, so nothing structural is lost.
+    """
+    recs = []
+    for w in wires:
+        a, b = w["p0"], w["p1"]
+        L = dist(a, b)
+        if L <= 1e-9:
+            continue
+        ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 180.0
+        recs.append((ang, w))
+    recs.sort(key=lambda r: r[0])
+    groups: List[List[Tuple[float, dict]]] = []
+    for ang, w in recs:
+        if groups and (ang - groups[-1][0][0]) <= angle_tol_deg:
+            groups[-1].append((ang, w))
+        else:
+            groups.append([(ang, w)])
+    if len(groups) > 1 and (groups[0][0][0] + 180.0 - groups[-1][-1][0]) <= angle_tol_deg:
+        groups[0] = groups.pop() + groups[0]
+    out: List[dict] = []
+    for g in groups:
+        ref = g[0][1]
+        u = unit((ref["p1"][0] - ref["p0"][0], ref["p1"][1] - ref["p0"][1]))
+        nrm = (-u[1], u[0])
+        items = []
+        for _, w in g:
+            c = (w["p0"][0] + w["p1"][0]) / 2 * nrm[0] + (w["p0"][1] + w["p1"][1]) / 2 * nrm[1]
+            s0 = w["p0"][0] * u[0] + w["p0"][1] * u[1]
+            s1 = w["p1"][0] * u[0] + w["p1"][1] * u[1]
+            items.append((c, min(s0, s1), max(s0, s1), w))
+        items.sort(key=lambda it: it[0])
+        lanes: List[List] = []
+        for it in items:
+            if lanes and it[0] - lanes[-1][-1][0] <= 0.5 * tol:
+                lanes[-1].append(it)
+            else:
+                lanes.append([it])
+        for lane in lanes:
+            lane.sort(key=lambda it: it[1])
+            run = [lane[0]]
+            for it in lane[1:]:
+                if it[1] <= max(r[2] for r in run) + tol:
+                    run.append(it)
+                else:
+                    out.append(_merged_line(run, u, nrm))
+                    run = [it]
+            out.append(_merged_line(run, u, nrm))
+    for i, w in enumerate(out):
+        w["id"] = f"W{i:05d}"
+    return out
+
+
+def _merged_line(run: list, u, nrm) -> dict:
+    """Merged line between the run's two extreme REAL endpoints (no re-projection, so a long
+    line keeps its exact geometry even when the group direction differs by a fraction of a degree)."""
+    pts = [p for it in run for p in (it[3]["p0"], it[3]["p1"])]
+    p0 = min(pts, key=lambda p: p[0] * u[0] + p[1] * u[1])
+    p1 = max(pts, key=lambda p: p[0] * u[0] + p[1] * u[1])
+    first = run[0][3]
+    return {"p0": p0, "p1": p1, "width": first["width"], "drawing_index": first["drawing_index"],
+            "item_index": first["item_index"], "source_pieces": len(run)}
+
+
+# ---------------------------------------------------------------------------
+# Calibration
+# ---------------------------------------------------------------------------
+
+def calibrate_labels(wires: List[dict], texts: List[dict], text_unit: float, axis_tol_deg: float) -> dict:
+    """Label side convention per wire orientation and typical label distance, from the data.
+
+    For every numeric text, the nearest parallel wire line it projects onto (within four
+    text heights) gives a signed offset (+ = below / right).  A clear majority on one side
+    fixes the convention: +1 below / right, -1 above / left, 0 printed on the wire.  The
+    distance limit is 2.4 x the median offset on the convention side.
+    """
+    U = text_unit
+    tn = math.tan(math.radians(axis_tol_deg))
+    idx = GridIndex(30.0)
+    for i, w in enumerate(wires):
+        idx.insert(i, w["p0"][0], w["p0"][1], w["p1"][0], w["p1"][1])
+    raws: Dict[str, List[float]] = {"horizontal": [], "vertical": []}
+    for t in texts:
+        if not t["is_numeric"] or t["orientation"] not in raws:
+            continue
+        cx, cy = t["center"]
+        best = None
+        for i in idx.query(cx - 4 * U, cy - 4 * U, cx + 4 * U, cy + 4 * U):
+            a, b = wires[i]["p0"], wires[i]["p1"]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            if t["orientation"] == "horizontal" and abs(dy) <= tn * abs(dx):
+                lo, hi, along = min(a[0], b[0]), max(a[0], b[0]), cx
+                tt = 0.0 if abs(dx) < 1e-9 else (cx - a[0]) / dx
+                raw = cy - (a[1] + tt * dy)
+            elif t["orientation"] == "vertical" and abs(dx) <= tn * abs(dy):
+                lo, hi, along = min(a[1], b[1]), max(a[1], b[1]), cy
+                tt = 0.0 if abs(dy) < 1e-9 else (cy - a[1]) / dy
+                raw = cx - (a[0] + tt * dx)
+            else:
+                continue
+            if lo - 0.4 * U <= along <= hi + 0.4 * U and abs(raw) <= 4 * U and (best is None or abs(raw) < abs(best)):
+                best = raw
+        if best is not None:
+            raws[t["orientation"]].append(best)
+    eps = 0.15 * U
+    conv: Dict[str, Optional[int]] = {}
+    evidence = {}
+    for o, rs in raws.items():
+        n = len(rs)
+        pos = sum(1 for r in rs if r > eps)
+        neg = sum(1 for r in rs if r < -eps)
+        inl = n - pos - neg
+        evidence[o] = {"samples": n, "positive": pos, "negative": neg, "on_wire": inl}
+        if n < 4:
+            conv[o] = None
+        elif pos >= 0.65 * n:
+            conv[o] = 1
+        elif neg >= 0.65 * n:
+            conv[o] = -1
+        elif inl >= 0.5 * n:
+            conv[o] = 0
+        else:
+            conv[o] = None
+    dists = []
+    for o, rs in raws.items():
+        c = conv[o] if conv[o] is not None else 1
+        for r in rs:
+            if c == 0 and abs(r) <= eps * 3:
+                dists.append(abs(r))
+            elif c != 0 and c * r > eps:
+                dists.append(c * r)
+    dists.sort()
+    median = dists[len(dists) // 2] if dists else None
+    return {"side_h": conv["horizontal"], "side_v": conv["vertical"], "median_distance": median,
+            "evidence": evidence}
+
+
+def calibrate_endpoint_tol(wires: List[dict], base: float) -> float:
+    """Endpoint join tolerance from the drawing's own gap distribution.
+
+    Distances from every wire end to the nearest other wire form a cluster near zero
+    (sloppy joins) and a far tail (free ends).  The tolerance covers that near cluster,
+    never less than base and never more than 1.5 x base (joins at dots and circles are
+    covered separately by snapping to the symbol, so a wide tolerance is never needed and
+    would merge neighbouring junction ends).
+    """
+    idx = GridIndex(20.0)
+    for i, w in enumerate(wires):
+        idx.insert(i, w["p0"][0], w["p0"][1], w["p1"][0], w["p1"][1])
+    window = 4.0 * base
+    small = []
+    for i, w in enumerate(wires):
+        for p in (w["p0"], w["p1"]):
+            best = None
+            for j in idx.query(p[0] - window, p[1] - window, p[0] + window, p[1] + window):
+                if j == i:
+                    continue
+                d, _ = point_segment_distance(p, wires[j]["p0"], wires[j]["p1"])
+                if best is None or d < best:
+                    best = d
+            if best is not None and 1e-3 < best <= window:
+                small.append(best)
+    small.sort()
+    if len(small) < 3:
+        return base
+    cut = None
+    for i in range(len(small) - 1):
+        if small[i + 1] > max(2.0 * small[i], small[i] + base):
+            cut = small[i]
+            break
+    if cut is None:
+        cut = small[-1] if small[-1] <= 0.75 * window else None
+    if cut is None:
+        return 1.5 * base if small[-1] > base else base
+    return min(1.5 * base, max(base, 1.25 * cut))
+
+
+def estimate_dot_diameter(symbols: List[dict], wires: List[dict], wire_unit: float, text_unit: float) -> Optional[float]:
+    """Median outer diameter of filled circles where three or more wires meet."""
+    idx = GridIndex(25.0)
+    for i, w in enumerate(wires):
+        idx.insert(i, w["p0"][0], w["p0"][1], w["p1"][0], w["p1"][1])
+    ds = []
+    for s in symbols:
+        if not s["has_filled_circle"] or s["outer_diameter"] > 1.5 * text_unit:
+            continue
+        reach = s["outer_diameter"] / 2.0 + max(1.5 * wire_unit, 0.2 * s["outer_diameter"])
+        dirs = symbol_directions(s, wires, idx, None, reach=reach)
+        if len(dirs) >= 3:
+            ds.append(s["outer_diameter"])
+    ds.sort()
+    return ds[len(ds) // 2] if ds else None
+
+
+def layout_unit(Ut: float, Uw: float, D: Optional[float], label_distance: Optional[float]) -> float:
+    """Scale of the drawing's layout from three independent cues, expressed in reference text
+    units: the text size, the label placement distance and the pen style (wire pen and junction
+    dot combined, so a drawing with both a fine pen and small dots counts as one style cue).
+    Their median; with two cues, the text size unless the other differs by half or more."""
+    style = Uw * REF_TEXT_UNIT / REF_WIRE_UNIT
+    if D:
+        style = math.sqrt(style * D * REF_TEXT_UNIT / REF_DOT_UNIT)
+    cues = [Ut, style]
+    if label_distance and label_distance > 0.3 * Ut:         # labels beside (not on) their wires
+        cues.append(label_distance * REF_TEXT_UNIT / REF_LABEL_DISTANCE)
+    if len(cues) == 3:
+        return sorted(cues)[1]
+    return Ut if abs(Ut - style) / Ut < 0.5 else min(cues)
+
+
+def text_angle_tolerance(texts: List[dict]) -> float:
+    """Orientation tolerance (deg) from how far texts deviate from the page axes."""
+    devs = sorted(min(abs(((t["angle_deg"] + 45.0) % 90.0) - 45.0), 45.0) for t in texts)
+    if not devs:
+        return 12.0
+    q99 = devs[min(len(devs) - 1, int(0.99 * len(devs)))]
+    return max(12.0, min(25.0, q99 + 3.0))
+
+
+def derive_config(base: EngineConfig, prof: dict, page_size: Tuple[float, float]) -> EngineConfig:
+    """Every distance threshold rescaled from the reference drawing to this PDF's units."""
+    Ut, Uw, D, UL = prof["text_unit"], prof["wire_unit"], prof["dot_unit"], prof["layout_unit"]
+    t, g = Ut / REF_TEXT_UNIT, UL / REF_TEXT_UNIT
+    c = replace(base)
+    c.text_unit, c.wire_unit, c.dot_unit, c.layout_unit = Ut, Uw, D, UL
+    c.wire_width = prof["wire_width"]
+    c.wire_widths = tuple(prof["wire_widths"])
+    c.wire_width_tol = max(0.02, 0.06 * Uw)
+    c.min_wire_length = 0.46 * Uw
+    # between hatching (2.5 % of the layout unit) and leaders (6 %) on the reference drawing, with
+    # the same margin both ways; independent of the wire pen, so a heavy or fine wire pen does
+    # not turn leaders into texture or hatching into leaders
+    c.significant_min_width = 0.04 * UL
+    c.significant_min_length = 0.6 * UL
+    c.endpoint_merge_tol = prof["endpoint_tol"]
+    c.split_tol = 0.67 * prof["endpoint_tol"]
+    c.gap_bridge_max = 1.2 * Ut
+    c.circle_merge_tol = 0.6 * g
+    c.dot_max_diameter = 1.39 * D
+    c.element_min_diameter = max(1.6 * D, 0.65 * UL)
+    c.circle_touch_tol = max(1.5 * Uw, 0.37 * D)
+    c.text_axis_tol_deg = prof["text_axis_tol_deg"]
+    c.label_min_side = 0.08 * Ut
+    c.label_max_side = prof["label_max_side"]
+    c.label_overlap_tol = 0.35 * Ut
+    c.projection_margin = 0.4 * Ut
+    c.inline_max_side = prof["inline_max_side"]
+    c.side_h = prof["side_h"]
+    c.side_v = prof["side_v"]
+    c.trace_max_length = 3.2 * max(page_size)
+    c.terminal_symbol_tol = 0.79 * UL
+    c.terminal_text_radius = 30.0 * g
+    c.element_text_radius = 22.0 * g
+    c.border_corner_tol = 0.5 * UL
+    c.border_band_tol = max(2.0 * Uw, 0.2 * UL)
+    del t
+    return c
+
+
+def calibrate_profile(page, cfg: EngineConfig) -> dict:
+    """Measure the drawing: orientation, text unit, wire pen(s), dot size, label convention,
+    label distance, endpoint precision and text angle tolerance.  Explicit settings in cfg
+    (wire_width, label_max_side_override, side_h, side_v) are kept."""
+    M0 = page.rotation_matrix
+    drawings = page.get_drawings()
+    theta, support = dominant_axis_angle(drawings, M0, page)
+    if not cfg.deskew or abs(theta) < 0.3 or support < 0.5:
+        theta = 0.0
+    M, to_display, view = view_transform(page, M0, theta)
+    all_texts = extract_text_objects(page, M, cfg, view)
+    Ut = estimate_text_unit(all_texts)          # first guess; refined from the wire labels below
+    for _ in range(2):
+        pre = replace(cfg, layout_unit=Ut, text_unit=Ut, border_corner_tol=0.5 * Ut,
+                      border_band_tol=max(1.0 * Ut / REF_TEXT_UNIT, 0.2 * Ut))
+        border = detect_sheet_border(page, M, drawings, [tuple(t["center"]) for t in all_texts], pre)
+        texts = [t for t in all_texts if not is_border_text(t, border)]
+        ww = detect_wire_widths(drawings, M, view, texts, Ut, border)
+        lu = ww["label_text_unit"]
+        if lu is None or abs(lu - Ut) <= 0.1 * Ut:
+            break
+        Ut = lu                                 # e.g. zone numbers of several sheets outnumber the labels
+    if cfg.wire_width is not None:
+        ww = dict(ww, widths=[cfg.wire_width], primary=cfg.wire_width, explicit=True)
+    elif ww["primary"] is None:
+        raise RuntimeError("Could not detect the harness wire stroke width; pass --wire-width.")
+    Uw = ww["primary"]
+    pre = replace(pre, wire_width=Uw, wire_widths=tuple(ww["widths"]), wire_unit=Uw,
+                  wire_width_tol=max(0.02, 0.06 * Uw), min_wire_length=0.46 * Uw)
+    vec = extract_vectors(page, M, pre, drawings, border, view)
+    base_tol = max(1.4 * Uw, 0.15 * Ut)
+    wires = merge_collinear_wires(vec["wires"], base_tol)
+    syms = merge_circles(vec["circles_raw"], replace(pre, circle_merge_tol=0.12 * Ut))
+    D = estimate_dot_diameter(syms, wires, Uw, Ut)
+    lab = calibrate_labels(wires, texts, Ut, cfg.axis_tol_deg)
+    UL = layout_unit(Ut, Uw, D, lab["median_distance"])
+    D = D if D else REF_DOT_UNIT * UL / REF_TEXT_UNIT
+    ep_tol = calibrate_endpoint_tol(wires, max(1.4 * Uw, 0.35 * D, 0.14 * UL))
+    side_h = cfg.side_h if cfg.side_h is not None else (lab["side_h"] if lab["side_h"] is not None else 1)
+    side_v = cfg.side_v if cfg.side_v is not None else (lab["side_v"] if lab["side_v"] is not None else 1)
+    med = lab["median_distance"]
+    if cfg.label_max_side_override is not None:
+        max_side = cfg.label_max_side_override
+    elif med:
+        max_side = max(2.4 * med, 1.2 * Ut)
+    else:
+        max_side = 10.5 * Ut / REF_TEXT_UNIT
+    prof = {
+        "deskew_deg": rnd(theta, 3), "axis_support": rnd(support, 3),
+        "text_unit": rnd(Ut, 4), "wire_unit": Uw, "dot_unit": rnd(D, 4), "layout_unit": rnd(UL, 4),
+        "wire_width": Uw, "wire_widths": ww["widths"], "wire_width_clusters": ww["clusters"][:6],
+        "endpoint_tol": rnd(ep_tol, 4), "label_median_distance": rnd(med, 4) if med else None,
+        "label_max_side": rnd(max_side, 4), "inline_max_side": rnd(max(0.6 * Ut, 1.2 * (med or 0)), 4),
+        "side_h": side_h, "side_v": side_v, "side_evidence": lab["evidence"],
+        "text_axis_tol_deg": rnd(text_angle_tolerance(texts), 2),
+    }
+    return {"profile": prof, "M": M, "to_display": to_display, "view": view, "drawings": drawings,
+            "all_texts": all_texts, "texts": texts, "border": border}
 
 
 # ---------------------------------------------------------------------------
@@ -855,10 +1405,12 @@ def cluster_directions(vectors: List[Tuple[Tuple[float, float], str]], merge_deg
     return clusters
 
 
-def symbol_directions(sym: dict, wires: List[dict], wire_index: GridIndex, cfg: EngineConfig) -> List[dict]:
+def symbol_directions(sym: dict, wires: List[dict], wire_index: GridIndex, cfg: Optional[EngineConfig],
+                      reach: Optional[float] = None) -> List[dict]:
     """Unique directions in which wires leave a circle symbol."""
     c = sym["center"]
-    reach = sym["outer_diameter"] / 2.0 + cfg.circle_touch_tol
+    if reach is None:
+        reach = sym["outer_diameter"] / 2.0 + cfg.circle_touch_tol
     vectors: List[Tuple[Tuple[float, float], str]] = []
     for wi in wire_index.query(c[0] - reach, c[1] - reach, c[0] + reach, c[1] + reach):
         w = wires[wi]
@@ -874,7 +1426,7 @@ def symbol_directions(sym: dict, wires: List[dict], wire_index: GridIndex, cfg: 
             u = unit((w["p1"][0] - w["p0"][0], w["p1"][1] - w["p0"][1]))
             vectors.append((u, w["id"]))
             vectors.append(((-u[0], -u[1]), w["id"]))
-    return cluster_directions(vectors, cfg.direction_merge_deg)
+    return cluster_directions(vectors, cfg.direction_merge_deg if cfg else 12.0)
 
 
 def classify_symbol(sym: dict, n_dirs: int, cfg: EngineConfig) -> str:
@@ -966,8 +1518,7 @@ def build_wire_graph(vec: dict, symbols: List[dict], cfg: EngineConfig) -> dict:
         anchors.append(w["p0"])
         anchors.append(w["p1"])
     for s in snap_symbols:
-        if s["outer_diameter"] < cfg.element_min_diameter or s["has_filled_circle"]:
-            anchors.append(s["center"])
+        anchors.append(s["center"])
     pieces = _split_wires(vec["wires"], anchors, cfg)
 
     sidx = GridIndex(25.0)
@@ -1049,12 +1600,97 @@ def build_wire_graph(vec: dict, symbols: List[dict], cfg: EngineConfig) -> dict:
         nodes[v]["edges"].append(e["id"])
 
     graph = {"nodes": nodes, "edges": edges, "pieces": pieces}
-    drop_table_components(graph, vec.get("page_size"), vec.get("border"))
+    bridge_gaps(graph, vec, cfg)
+    drop_table_components(graph, vec.get("page_size"), vec.get("border"), cfg)
     classify_nodes(graph, vec, cfg)
     return graph
 
 
-def drop_table_components(graph: dict, page_size: Optional[Tuple[float, float]], border: Optional[dict]) -> None:
+def bridge_gaps(graph: dict, vec: dict, cfg: EngineConfig) -> None:
+    """Join two free wire ends that face each other on one line with nothing but text between.
+
+    Covers wires broken by imprecise drawing and wires interrupted where a number is
+    printed on the wire.  Gaps containing symbol geometry or circles are never bridged.
+    """
+    nodes, edges = graph["nodes"], graph["edges"]
+    U = cfg.text_unit
+    free = []
+    for n in nodes:
+        if n["symbol"] is None and len(n["edges"]) == 1:
+            _, near, far = edge_far(graph, n["edges"][0], n["id"])
+            free.append((n["id"], unit((near[0] - far[0], near[1] - far[1]))))
+    if len(free) < 2:
+        graph["bridged_gaps"] = 0
+        return
+    oidx = GridIndex(20.0)
+    sig = [o for o in vec["other_lines"] if is_significant_line(o, cfg)]
+    for i, o in enumerate(sig):
+        oidx.insert(i, o["p0"][0], o["p0"][1], o["p1"][0], o["p1"][1])
+    tidx = GridIndex(20.0)
+    texts = vec.get("texts") or []
+    for i, t in enumerate(texts):
+        tidx.insert(i, *t["bbox"])
+    fidx = GridIndex(20.0)
+    for k, (nid, _) in enumerate(free):
+        p = nodes[nid]["point"]
+        fidx.insert(k, p[0], p[1], p[0], p[1])
+    cands = []
+    reach = max(cfg.gap_bridge_max, 4.0 * U)
+    cos_tol = math.cos(math.radians(5.0))
+    for k, (a, ua) in enumerate(free):
+        pa = nodes[a]["point"]
+        for j in fidx.query(pa[0] - reach, pa[1] - reach, pa[0] + reach, pa[1] + reach):
+            if j <= k:
+                continue
+            b, ub = free[j]
+            pb = nodes[b]["point"]
+            gap = dist(pa, pb)
+            if gap <= cfg.endpoint_merge_tol or gap > reach:
+                continue
+            v = unit((pb[0] - pa[0], pb[1] - pa[1]))
+            if ua[0] * v[0] + ua[1] * v[1] < cos_tol or -(ub[0] * v[0] + ub[1] * v[1]) < cos_tol:
+                continue
+            limit = cfg.gap_bridge_max
+            for ti in tidx.query(min(pa[0], pb[0]) - U, min(pa[1], pb[1]) - U, max(pa[0], pb[0]) + U, max(pa[1], pb[1]) + U):
+                t = texts[ti]
+                d, tp = point_segment_distance(t["center"], pa, pb)
+                if t["is_numeric"] and d <= 0.6 * U and 0.0 < tp < 1.0:
+                    ext = max(t["bbox"][2] - t["bbox"][0], t["bbox"][3] - t["bbox"][1])
+                    limit = max(limit, ext + 1.0 * U)       # wire interrupted by a printed number
+            if gap > limit:
+                continue
+            blocked = False
+            for oi in oidx.query(min(pa[0], pb[0]), min(pa[1], pb[1]), max(pa[0], pb[0]), max(pa[1], pb[1])):
+                o = sig[oi]
+                if point_segment_distance(o["p0"], pa, pb)[0] <= 0.3 * U or \
+                        point_segment_distance(o["p1"], pa, pb)[0] <= 0.3 * U:
+                    blocked = True
+                    break
+            if not blocked:
+                for c in vec.get("circles_raw", []):
+                    if point_segment_distance(c["center"], pa, pb)[0] <= c["diameter"] / 2 + 0.2 * U:
+                        blocked = True
+                        break
+            if not blocked:
+                cands.append((gap, a, b))
+    cands.sort()
+    used = set()
+    n_br = 0
+    for gap, a, b in cands:
+        if a in used or b in used:
+            continue
+        used |= {a, b}
+        e = {"id": len(edges), "u": a, "v": b, "pu": nodes[a]["point"], "pv": nodes[b]["point"],
+             "length": gap, "wire_ids": ["BRIDGE"]}
+        edges.append(e)
+        nodes[a]["edges"].append(e["id"])
+        nodes[b]["edges"].append(e["id"])
+        n_br += 1
+    graph["bridged_gaps"] = n_br
+
+
+def drop_table_components(graph: dict, page_size: Optional[Tuple[float, float]], border: Optional[dict],
+                          cfg: Optional[EngineConfig] = None) -> None:
     """Remove wire-width components that are drawing tables or frames, not harness.
 
     A component is dropped when it has no junction dot or circular element, only
@@ -1068,8 +1704,11 @@ def drop_table_components(graph: dict, page_size: Optional[Tuple[float, float]],
     for x0, y0, x1, y1 in (border or {}).get("frames", []):
         frame_edges += [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x0, y1), (x1, y1)), ((x0, y0), (x0, y1))]
 
+    U = cfg.layout_unit if cfg else REF_TEXT_UNIT
+    ax = 0.1 * U
+
     def on_frame(p) -> bool:
-        return any(point_segment_distance(p, a, b)[0] <= 1.5 for a, b in frame_edges)
+        return any(point_segment_distance(p, a, b)[0] <= 0.3 * U for a, b in frame_edges)
 
     nodes, edges = graph["nodes"], graph["edges"]
     seen = set()
@@ -1091,7 +1730,7 @@ def drop_table_components(graph: dict, page_size: Optional[Tuple[float, float]],
         ceids = {eid for n in comp for eid in nodes[n]["edges"]}
         if any(nodes[n]["symbol"] is not None for n in comp):
             continue
-        if not all(abs(edges[e]["pu"][0] - edges[e]["pv"][0]) <= 0.5 or abs(edges[e]["pu"][1] - edges[e]["pv"][1]) <= 0.5
+        if not all(abs(edges[e]["pu"][0] - edges[e]["pv"][0]) <= ax or abs(edges[e]["pu"][1] - edges[e]["pv"][1]) <= ax
                    for e in ceids):
             continue
         cycles = len(ceids) - len(comp) + 1
@@ -1102,7 +1741,7 @@ def drop_table_components(graph: dict, page_size: Optional[Tuple[float, float]],
         touches = False
         if border and border.get("inner"):
             r = border["inner"]
-            touches = min(abs(bb[0] - r[0]), abs(bb[2] - r[2]), abs(bb[1] - r[1]), abs(bb[3] - r[3])) <= 2.5
+            touches = min(abs(bb[0] - r[0]), abs(bb[2] - r[2]), abs(bb[1] - r[1]), abs(bb[3] - r[3])) <= 0.5 * U
         free_ends = [n for n in comp if len(nodes[n]["edges"]) == 1]
         hangs = bool(frame_edges) and bool(free_ends) and all(on_frame(nodes[n]["point"]) for n in free_ends)
         if cycles >= 2 or (cycles >= 1 and (touches or big)) or hangs:
@@ -1143,7 +1782,7 @@ def _near_symbol_geometry(p: Sequence[float], vec: dict, idx: GridIndex, cfg: En
     tol = cfg.terminal_symbol_tol
     for li in idx.query(p[0] - tol, p[1] - tol, p[0] + tol, p[1] + tol):
         o = vec["other_lines"][li]
-        if o["width"] < cfg.terminal_symbol_min_width and not o.get("filled"):
+        if not (is_significant_line(o, cfg) or o.get("filled")):
             continue
         d, _ = point_segment_distance(p, o["p0"], o["p1"])
         if d <= tol:
@@ -1208,9 +1847,10 @@ def strict_label_metrics(p0: Sequence[float], p1: Sequence[float], text: dict,
                          cfg: EngineConfig, orientation: Optional[str] = None) -> Tuple[Optional[dict], str]:
     """Check a numeric text against one straight wire piece.
 
-    Returns (metrics, "ok") for a valid candidate, or (None, reason).
-    PDF / displayed-frame y grows downwards, so "below" means larger y and
-    "right" means larger x.
+    Returns (metrics, "ok") for a valid candidate, or (None, reason).  Analysis-frame y grows
+    downwards.  The required side comes from the calibrated convention: side_h +1 = below a
+    horizontal wire (the standard), -1 = above, 0 = printed on the wire; side_v +1 = right of
+    a vertical wire (the standard), -1 = left, 0 = on the wire.
     """
     if not text.get("is_numeric"):
         return None, "not_numeric"
@@ -1229,8 +1869,9 @@ def strict_label_metrics(p0: Sequence[float], p1: Sequence[float], text: dict,
             return None, "outside_projection"
         t = 0.0 if hi - lo <= 1e-9 else min(1.0, max(0.0, (cx - lo) / (hi - lo)))
         wire_c = a[1] + t * (b[1] - a[1])
-        side = cy - wire_c                      # positive = below
-        near_edge_gap = y0 - wire_c
+        raw = cy - wire_c                       # positive = below
+        conv = 1 if cfg.side_h is None else cfg.side_h
+        near_edge_gap = (y0 - wire_c) if conv >= 0 else (wire_c - y1)
         along = cx
     else:
         if text["orientation"] != "vertical":
@@ -1241,21 +1882,30 @@ def strict_label_metrics(p0: Sequence[float], p1: Sequence[float], text: dict,
             return None, "outside_projection"
         t = 0.0 if hi - lo <= 1e-9 else min(1.0, max(0.0, (cy - lo) / (hi - lo)))
         wire_c = a[0] + t * (b[0] - a[0])
-        side = cx - wire_c                      # positive = right
-        near_edge_gap = x0 - wire_c
+        raw = cx - wire_c                       # positive = right
+        conv = 1 if cfg.side_v is None else cfg.side_v
+        near_edge_gap = (x0 - wire_c) if conv >= 0 else (wire_c - x1)
         along = cy
-    if side <= cfg.label_min_side:
-        return None, "wrong_side"
-    if side > cfg.label_max_side:
-        return None, "too_far"
-    if near_edge_gap < -cfg.label_overlap_tol:
-        return None, "overlaps_wire"
+    if conv == 0:                               # numbers printed on the wire
+        side = abs(raw)
+        limit = cfg.inline_max_side
+        if side > limit:
+            return None, "too_far"
+    else:
+        side = conv * raw
+        limit = cfg.label_max_side
+        if side <= cfg.label_min_side:
+            return None, "wrong_side"
+        if side > limit:
+            return None, "too_far"
+        if near_edge_gap < -cfg.label_overlap_tol:
+            return None, "overlaps_wire"
     length = hi - lo
     mid = (lo + hi) / 2.0
-    half = max(length / 2.0, 1.0)
+    half = max(length / 2.0, 0.2 * cfg.text_unit)
     centre_err = abs(along - mid)
     projection = 0.5 if length <= 1e-9 else (along - lo) / length
-    score = side / cfg.label_max_side + cfg.centre_weight * min(centre_err / half, 2.0)
+    score = side / limit + cfg.centre_weight * min(centre_err / half, 2.0)
     return {
         "orientation": orient,
         "perpendicular_distance": rnd(side),
@@ -1314,7 +1964,7 @@ def trace_direction(graph: dict, start_node: int, first_edge: int, texts: List[d
         if cands:
             cands.sort(key=lambda c: (c["along"], c["score"]))
             best = cands[0]
-            close = [c for c in cands[1:] if abs(c["along"] - best["along"]) < 3.0
+            close = [c for c in cands[1:] if abs(c["along"] - best["along"]) < 0.6 * cfg.layout_unit
                      and abs(c["score"] - best["score"]) < cfg.ambiguity_score_gap
                      and texts[c["text_index"]]["norm"] != texts[best["text_index"]]["norm"]]
             t = texts[best["text_index"]]
@@ -1398,27 +2048,45 @@ def compute_depth1_ids(graph: dict, texts: List[dict], cfg: EngineConfig) -> Lis
 # ---------------------------------------------------------------------------
 
 def extract_page(page, cfg: EngineConfig) -> dict:
-    """Run text + vector extraction, symbols, graph and depth-1 ids for one page."""
-    M = page_matrix(page)
-    all_texts = extract_text_objects(page, M, cfg)
-    drawings = page.get_drawings()
-    border = detect_sheet_border(page, M, drawings, [tuple(t["center"]) for t in all_texts], cfg)
-    texts = [t for t in all_texts if not is_border_text(t, border)]
+    """Calibrate the drawing, then run vector extraction, symbols, graph and depth-1 ids.
+
+    All geometry is in the analysis frame (displayed page, de-skewed when the drawing is
+    rotated off the page axes); ext["to_display"] maps it back to the displayed page.
+    """
+    cal = calibrate_profile(page, cfg)
+    prof = cal["profile"]
+    M, border = cal["M"], cal["border"]
+    dcfg = derive_config(cfg, prof, (page.rect.width, page.rect.height))
+    tol = math.sin(math.radians(dcfg.text_axis_tol_deg))
+    texts = cal["texts"]
     for i, t in enumerate(texts):
         t["id"] = f"T{i:05d}"
-    vec = extract_vectors(page, M, cfg, drawings, border)
+        dx, dy = t["dir"]
+        t["orientation"] = "horizontal" if abs(dy) <= tol else ("vertical" if abs(dx) <= tol else "angled")
+    vec = extract_vectors(page, M, dcfg, cal["drawings"], border, cal["view"])
+    vec["wires"] = merge_collinear_wires(vec["wires"], dcfg.endpoint_merge_tol)
     vec["border"] = border
+    vec["texts"] = texts
     vec["page_size"] = (page.rect.width, page.rect.height)
-    symbols = build_symbols(vec, cfg)
-    graph = build_wire_graph(vec, symbols, cfg)
-    junctions = compute_depth1_ids(graph, texts, cfg)
+    symbols = build_symbols(vec, dcfg)
+    graph = build_wire_graph(vec, symbols, dcfg)
+    junctions = compute_depth1_ids(graph, texts, dcfg)
     border_report = {"frames": [list(f) for f in border["frames"]],
                      "drawing_area": [rnd(v) for v in border["inner"]] if border["inner"] else None,
-                     "border_texts_excluded": len(all_texts) - len(texts),
+                     "border_texts_excluded": len(cal["all_texts"]) - len(texts),
                      "border_lines_excluded": vec["border_lines_excluded"],
                      "table_components_dropped": graph.get("dropped_components", [])}
-    return {"matrix": M, "texts": texts, "vectors": vec, "symbols": symbols,
-            "graph": graph, "junctions": junctions, "border": border_report}
+    T = cal["to_display"]
+    return {"matrix": M, "to_display": T, "texts": texts, "vectors": vec, "symbols": symbols,
+            "graph": graph, "junctions": junctions, "border": border_report, "profile": prof, "cfg": dcfg}
+
+
+def to_display_pt(ext: dict, p: Sequence[float]) -> Tuple[float, float]:
+    """Analysis-frame point -> displayed page point (identity unless the drawing was de-skewed)."""
+    T = ext.get("to_display")
+    if T is None:
+        return (float(p[0]), float(p[1]))
+    return (T.a * p[0] + T.c * p[1] + T.e, T.b * p[0] + T.d * p[1] + T.f)
 
 
 def symbols_to_json(symbols: List[dict]) -> List[dict]:
@@ -1499,20 +2167,26 @@ DIRECTION_COLORS = [(230, 25, 75), (60, 180, 75), (0, 130, 200), (245, 130, 48),
 
 def draw_wires_and_text(img: np.ndarray, ext: dict, zoom: float) -> np.ndarray:
     out = fade(img)
+
+    def zp(p, z):                          # analysis frame -> displayed pixels
+        q = to_display_pt(ext, p)
+        return (int(round(q[0] * z)), int(round(q[1] * z)))
     for w in ext["vectors"]["wires"]:
         cv2.line(out, zp(w["p0"], zoom), zp(w["p1"], zoom), (255, 120, 0), max(2, int(zoom)), cv2.LINE_AA)
     colors = {"horizontal": (0, 160, 0), "vertical": (200, 0, 200), "angled": (0, 120, 255)}
     for t in ext["texts"]:
         b = t["bbox"]
         col = colors[t["orientation"]] if t["is_numeric"] else (150, 150, 150)
-        cv2.rectangle(out, zp((b[0], b[1]), zoom), zp((b[2], b[3]), zoom), col, 2 if t["is_numeric"] else 1)
+        corners = np.array([zp(c, zoom) for c in ((b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3]))], np.int32)
+        cv2.polylines(out, [corners], True, col, 2 if t["is_numeric"] else 1)
     for n in ext["graph"]["nodes"]:
         if n["kind"] in ("terminal", "open", "branch", "element"):
             col = {"terminal": (0, 140, 0), "open": (0, 0, 255), "branch": (255, 0, 255),
                    "element": (180, 0, 180)}[n["kind"]]
             cv2.circle(out, zp(n["point"], zoom), max(5, int(2.5 * zoom)), col, 2, cv2.LINE_AA)
     for f in ext.get("border", {}).get("frames", []):
-        cv2.rectangle(out, zp((f[0], f[1]), zoom), zp((f[2], f[3]), zoom), (0, 200, 255), 1)
+        corners = np.array([zp(c, zoom) for c in ((f[0], f[1]), (f[2], f[1]), (f[2], f[3]), (f[0], f[3]))], np.int32)
+        cv2.polylines(out, [corners], True, (0, 200, 255), 1)
     return add_legend_strip(out, [
         ("wires", (255, 120, 0)),
         ("numeric text: horizontal", (0, 160, 0)), ("numeric text: vertical", (200, 0, 200)),
@@ -1523,6 +2197,10 @@ def draw_wires_and_text(img: np.ndarray, ext: dict, zoom: float) -> np.ndarray:
 
 def draw_junction_diagnostics(img: np.ndarray, ext: dict, zoom: float) -> np.ndarray:
     out = fade(img)
+
+    def zp(p, z):                          # analysis frame -> displayed pixels
+        q = to_display_pt(ext, p)
+        return (int(round(q[0] * z)), int(round(q[1] * z)))
     for s in ext["symbols"]:
         col = SYMBOL_COLORS.get(s.get("kind"), (0, 0, 0))
         r = max(4, int(round(s["outer_diameter"] / 2.0 * zoom)) + 3)
@@ -1537,7 +2215,9 @@ def draw_junction_diagnostics(img: np.ndarray, ext: dict, zoom: float) -> np.nda
                 t = next((t for t in ext["texts"] if t["id"] == d["label_text_id"]), None)
                 if t:
                     b = t["bbox"]
-                    cv2.rectangle(out, zp((b[0], b[1]), zoom), zp((b[2], b[3]), zoom), col, 2)
+                    corners = np.array([zp(c, zoom) for c in ((b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3]))],
+                                       np.int32)
+                    cv2.polylines(out, [corners], True, col, 2)
         jp = zp(j["point"], zoom)
         cv2.circle(out, jp, max(5, int(2 * zoom)), (0, 0, 230), -1, cv2.LINE_AA)
         put_label(out, j["structural_id"], (jp[0] + 6, jp[1] - 6), (0, 0, 160), 0.45)
@@ -1552,14 +2232,19 @@ def draw_junction_diagnostics(img: np.ndarray, ext: dict, zoom: float) -> np.nda
 # Command line
 # ---------------------------------------------------------------------------
 
+SIDE_CHOICES = {"auto": None, "below": 1, "above": -1, "right": 1, "left": -1, "on-wire": 0}
+
+
 def add_engine_args(ap: argparse.ArgumentParser) -> None:
-    ap.add_argument("--wire-width", default="0.539",
-                    help="Harness wire stroke width in PDF points, or 'auto' (default 0.539).")
-    ap.add_argument("--wire-width-tol", type=float, default=0.03)
-    ap.add_argument("--label-max-side", type=float, default=10.5,
-                    help="Maximum distance (pt) from wire to label centre on the required side.")
-    ap.add_argument("--projection-margin", type=float, default=2.0,
-                    help="How far (pt) a label centre may project beyond a straight piece end.")
+    ap.add_argument("--wire-width", default="auto",
+                    help="Harness wire stroke width in PDF points, or 'auto' (default: measured per PDF).")
+    ap.add_argument("--label-max-side", default="auto",
+                    help="Maximum label distance from its wire in pt, or 'auto' (default: 2.1 x measured median).")
+    ap.add_argument("--label-side-h", default="auto", choices=["auto", "below", "above", "on-wire"],
+                    help="Side of horizontal wires carrying their numbers (default: detected per PDF).")
+    ap.add_argument("--label-side-v", default="auto", choices=["auto", "right", "left", "on-wire"],
+                    help="Side of vertical wires carrying their numbers (default: detected per PDF).")
+    ap.add_argument("--no-deskew", action="store_true", help="Do not straighten a drawing rotated off the page axes.")
 
 
 def engine_config_from_args(args) -> EngineConfig:
@@ -1569,9 +2254,14 @@ def engine_config_from_args(args) -> EngineConfig:
         cfg.wire_width = None if ww == "auto" else float(ww)
     except ValueError:
         raise ValueError(f"--wire-width must be a number or 'auto' (got {args.wire_width!r})")
-    cfg.wire_width_tol = float(args.wire_width_tol)
-    cfg.label_max_side = float(args.label_max_side)
-    cfg.projection_margin = float(args.projection_margin)
+    lm = str(args.label_max_side).strip().lower()
+    try:
+        cfg.label_max_side_override = None if lm == "auto" else float(lm)
+    except ValueError:
+        raise ValueError(f"--label-max-side must be a number or 'auto' (got {args.label_max_side!r})")
+    cfg.side_h = SIDE_CHOICES[args.label_side_h]
+    cfg.side_v = SIDE_CHOICES[args.label_side_v]
+    cfg.deskew = not args.no_deskew
     return cfg
 
 
@@ -1591,9 +2281,11 @@ def run(pdf: str, out_dir: str, page_no: int, zoom: float, cfg: EngineConfig, im
         data = {
             "schema": "harness-junctions/1",
             "generator": {"script": os.path.basename(__file__), "engine": ENGINE_NAME, "version": ENGINE_VERSION},
-            "coordinate_frame": "displayed_page",
+            "coordinate_frame": "analysis_frame" if ext["profile"]["deskew_deg"] else "displayed_page",
+            "analysis_to_display": [rnd(v, 6) for v in ext["to_display"]],
+            "profile": ext["profile"],
             "source_pdf": source_pdf_info(pdf, page),
-            "config": cfg.to_dict(),
+            "config": ext["cfg"].to_dict(),
             "wire_width_used": ext["vectors"]["wire_width"],
             "summary": {
                 "wire_vectors": len(ext["vectors"]["wires"]),
@@ -1655,7 +2347,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
     s = data["summary"]
     print(f"PDF            : {args.pdf} (page {args.page})")
-    print(f"Wire width     : {data['wire_width_used']}")
+    pr = data["profile"]
+    print(f"Wire width     : {data['wire_width_used']}  (wire pens {pr['wire_widths']})")
+    print(f"Calibration    : text unit {pr['text_unit']}, dot {pr['dot_unit']}, layout unit {pr['layout_unit']}, "
+          f"de-skew {pr['deskew_deg']} deg, label side h={pr['side_h']} v={pr['side_v']}, "
+          f"label max {pr['label_max_side']}, endpoint tol {pr['endpoint_tol']}")
     print(f"Wire vectors   : {s['wire_vectors']}   texts: {s['texts']} (numeric {s['numeric_texts']})")
     print(f"Circle symbols : {s['circle_symbols']}  {s['symbol_kinds']}")
     print(f"Graph          : {s['graph_nodes']} nodes, {s['graph_edges']} edges  {s['node_kinds']}")
