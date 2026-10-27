@@ -28,11 +28,18 @@ Tested with Python 3.12 / 3.13, PyMuPDF 2.0, OpenCV 5.0 and NumPy 2.5.
 
 ## Desktop application (Windows .exe)
 
-Build once on a Windows PC with 64-bit Python 3.10+ from python.org: double-click
-`build_exe.bat` (or run it in a command prompt in this folder). It creates a private virtual
-environment, installs the requirements and PyInstaller, and writes `dist\HarnessCompare.exe`,
-a single file that runs on other Windows PCs without Python. `build_exe.sh` does the same on
-macOS / Linux. Without building, `python harness_compare_app.py` opens the same window.
+Build once on a Windows PC with 64-bit Python **3.10.1 or newer** (3.12 recommended) from
+python.org: double-click `build_exe.bat` (or run it in a command prompt in this folder). It
+picks the newest installed Python, creates a private virtual environment, installs the
+requirements and PyInstaller, and writes `dist\HarnessCompare.exe`, a single file that runs on
+other Windows PCs without Python. `build_exe.sh` does the same on macOS / Linux. Without
+building, `python harness_compare_app.py` opens the same window.
+
+If the build stops with `IndexError: tuple index out of range` in `dis.py`, the Python is
+3.10.0, which has a bug that breaks PyInstaller. Install Python 3.12 (64-bit) from
+https://www.python.org/downloads/windows/: a per-user install needs no administrator rights;
+tick "Add python.exe to PATH". Then run `build_exe.bat` again. It uses the newer Python and
+replaces the `.venv` made by 3.10.0 by itself.
 
 Using the application:
 

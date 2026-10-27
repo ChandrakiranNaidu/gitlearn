@@ -4,6 +4,15 @@
 set -e
 cd "$(dirname "$0")"
 PY=${PYTHON:-python3}
+OK='import sys, tkinter; sys.exit(0 if sys.version_info[:3] >= (3, 10, 1) else 1)'
+if ! "$PY" -c "$OK" 2>/dev/null; then
+    echo "$("$PY" --version 2>&1) cannot build the app: Python 3.10.1 or newer with tkinter is needed"
+    echo "(Python 3.10.0 has a bug that breaks PyInstaller: IndexError: tuple index out of range)."
+    exit 1
+fi
+if [ -x .venv/bin/python ] && ! .venv/bin/python -c "$OK" 2>/dev/null; then
+    rm -rf .venv                        # made earlier by an unusable Python
+fi
 [ -d .venv ] || "$PY" -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
