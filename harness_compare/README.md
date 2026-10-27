@@ -12,16 +12,65 @@ for extraction, text association and drawing the result images.
 | `build_logical_segments.py` (Script 2) | Connectivity graph, logical boundary-to-boundary segments, initial key-based comparison | `pdf_a_segments.json`, `pdf_b_segments.json`, `segment_comparison_initial.json`, images |
 | `compare_and_render_segments_v6.py` (Script 3) | Strict global text ownership, terminal enrichment, fuzzy one-to-one matching, final classification | `segment_comparison_v6.json`, corrected segment JSONs, `pdf_a/b_segment_changes_v6.png` |
 
+| `batch_compare.py` | Multi-page driver: pairs the pages of two PDFs, runs Scripts 2 and 3 for every page pair | one folder per page pair, `batch_summary.csv/.json` |
+| `harness_compare_app.py` | Desktop application (window) on top of `batch_compare.py`; builds into `HarnessCompare.exe` | same as `batch_compare.py` |
+
 Script 2 imports Script 1 (keep both files in the same folder). Script 3 is a single stand-alone
 file that only needs the two PDFs and their segment JSON files.
 
 ## Install
 
 ```bash
-pip install pymupdf opencv-python-headless numpy
+pip install -r requirements.txt        # pymupdf, opencv-python-headless, numpy
 ```
 
-Tested with Python 3.13, PyMuPDF 2.0, OpenCV 5.0 and NumPy 2.5.
+Tested with Python 3.12 / 3.13, PyMuPDF 2.0, OpenCV 5.0 and NumPy 2.5.
+
+## Desktop application (Windows .exe)
+
+Build once on a Windows PC with 64-bit Python 3.10+ from python.org: double-click
+`build_exe.bat` (or run it in a command prompt in this folder). It creates a private virtual
+environment, installs the requirements and PyInstaller, and writes `dist\HarnessCompare.exe`,
+a single file that runs on other Windows PCs without Python. `build_exe.sh` does the same on
+macOS / Linux. Without building, `python harness_compare_app.py` opens the same window.
+
+Using the application:
+
+1. **Old PDF (A)** and **New PDF (B)**: choose the files (single or multi-page). The page count is
+   shown next to each. The output folder is filled in automatically (it can be changed).
+2. **Page pairing**:
+   * *Automatic*: when one PDF has a single page and the other several, that page is compared
+     with every page of the other PDF. Otherwise pages are compared page by page (1-1, 2-2, ...),
+     and extra pages are listed as "only in A" / "only in B".
+   * *Page by page*: always 1-1, 2-2, ...
+   * *Every page against every page*: for PDFs whose page order differs.
+   Whenever a page is compared with several pages, its closest partner is marked **Best match**.
+3. **Compare**: progress and a log are shown, and the work can be cancelled. Each page pair
+   then appears as a row: *No differences*, *Differences found* (with the
+   changed / review / removed / added counts) or *Skipped* (a page without a harness drawing,
+   such as a cover sheet or parts list). Double-click a row to open its two marked pages;
+   the buttons open the pair folder, the summary CSV or the output folder.
+
+Output folder: `A_p01_vs_B_p01/` etc. (Script 3 results and marked images of each pair, plus a
+`log.txt`), `segments/` (segment JSON of every page, computed once per page), and
+`batch_summary.csv` / `batch_summary.json`.
+
+The same runs without a window:
+
+```bash
+python batch_compare.py --pdf-a old.pdf --pdf-b new.pdf --out results [--pairing auto|page-by-page|all-pairs] [--zoom 2]
+HarnessCompare.exe --pdf-a old.pdf --pdf-b new.pdf --out results        # no console output; see results
+```
+
+Notes:
+
+* The single-file .exe unpacks itself on every start, which takes a few seconds. For faster
+  starts, replace `--onefile` with `--onedir` in the build script and ship the whole
+  `dist\HarnessCompare` folder.
+* Some antivirus tools are suspicious of new unsigned PyInstaller programs. If yours is,
+  allow the file or sign it.
+* Text box geometry is fixed by the scripts themselves (PyMuPDF quad corrections off), so
+  results are the same with or without optional PyMuPDF add-ons, in Python and in the .exe.
 
 ## Run
 
@@ -41,7 +90,8 @@ python compare_and_render_segments_v6.py \
 python junction_depth1_ids.py --pdf old.pdf --out junctions_old
 ```
 
-Common options: `--page` (zero-based, default 0), `--zoom` (default 3.0),
+Common options: `--page` (zero-based, default 0; `--page-a` / `--page-b` pick different pages of
+the two PDFs), `--zoom` (default 3.0),
 `--mark-same` (Script 3: also draw unchanged segments). Calibration overrides (all default to
 `auto`, measured per PDF): `--wire-width`, `--label-max-side`, `--label-side-h {below,above,on-wire}`,
 `--label-side-v {right,left,on-wire}`, and `--no-deskew`.
@@ -189,6 +239,8 @@ and 3 end to end. It checks:
 * presentation variants (scaled + skewed with a heavier pen, larger font, bigger dots and split
   wires; turned 90 deg with a lighter pen and smaller font) give no findings against the
   original, and the same findings as the original pair
+* multi-page PDFs: the page pairing rules; a single page compared with a 3-page PDF finds the
+  identical page as best match and the edited page's changes, and skips a page without a harness
 
 It also covers compilation, the regexes, the side rules, global text and terminal ownership,
 output files, and the absence of HTML markup in the sources.

@@ -71,6 +71,12 @@ try:  # PyMuPDF >= 1.24 exposes "pymupdf"; older versions only "fitz".
 except ImportError:  # pragma: no cover
     import fitz  # type: ignore
 
+# Text boxes from nominal ascender / descender (0.8 / -0.2 of the font size) rather than
+# per-font corrections: the same box geometry for every font, and the same results whatever
+# PyMuPDF add-ons are installed (the layout and table add-ons switch this global on import).
+if hasattr(fitz, "TOOLS") and hasattr(fitz.TOOLS, "unset_quad_corrections"):
+    fitz.TOOLS.unset_quad_corrections(True)
+
 ENGINE_NAME = "harness-vector-engine"
 ENGINE_VERSION = "1.0"
 

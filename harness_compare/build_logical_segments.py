@@ -986,6 +986,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--pdf-b", help="New / comparison PDF (optional: segments for A only).")
     ap.add_argument("--out", required=True, help="Output directory.")
     ap.add_argument("--page", type=int, default=0, help="Zero-based page number (default 0).")
+    ap.add_argument("--page-a", type=int, help="Zero-based page of PDF A (default: --page).")
+    ap.add_argument("--page-b", type=int, help="Zero-based page of PDF B (default: --page).")
     ap.add_argument("--zoom", type=float, default=3.0, help="Rendering zoom (default 3.0).")
     ap.add_argument("--no-images", action="store_true", help="Skip images.")
     eng.add_engine_args(ap)
@@ -997,17 +999,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         os.makedirs(args.out, exist_ok=True)
         written = []
         results = {}
+        pages = {"a": args.page if args.page_a is None else args.page_a,
+                 "b": args.page if args.page_b is None else args.page_b}
         for tag, pdf in (("a", args.pdf_a), ("b", args.pdf_b)):
             if not pdf:
                 continue
-            data, _ = build_segments_for_pdf(pdf, args.page, cfg)
+            data, _ = build_segments_for_pdf(pdf, pages[tag], cfg)
             p = os.path.join(args.out, f"pdf_{tag}_segments.json")
             write_json(p, data)
             written.append(p)
             results[tag] = data
             if not args.no_images:
                 ov = os.path.join(args.out, f"pdf_{tag}_segments_overview.png")
-                render_overview(pdf, args.page, data, args.zoom, ov)
+                render_overview(pdf, pages[tag], data, args.zoom, ov)
                 written.append(ov)
             s = data["summary"]
             print(f"PDF {tag.upper()}: {pdf}")
@@ -1032,8 +1036,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                      [(r["segment_b"], (0, 170, 0)) for r in cmp_res["added"]]
                 pa = os.path.join(args.out, "pdf_a_segments_initial.png")
                 pb = os.path.join(args.out, "pdf_b_segments_initial.png")
-                render_initial_marks(args.pdf_a, args.page, results["a"], ma, args.zoom, pa)
-                render_initial_marks(args.pdf_b, args.page, results["b"], mb, args.zoom, pb)
+                render_initial_marks(args.pdf_a, pages["a"], results["a"], ma, args.zoom, pa)
+                render_initial_marks(args.pdf_b, pages["b"], results["b"], mb, args.zoom, pb)
                 written += [pa, pb]
             print(f"Initial comparison: {cmp_res['summary']}")
     except (FileNotFoundError, ValueError, RuntimeError) as exc:

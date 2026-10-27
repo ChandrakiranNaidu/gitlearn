@@ -4,3 +4,8 @@ __pycache__/
 segments_pair/
 comparison_output/
 junctions_*/
+# exe build
+.venv/
+build/
+dist/
+*.spec

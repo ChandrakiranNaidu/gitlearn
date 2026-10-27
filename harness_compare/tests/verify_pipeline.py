@@ -43,7 +43,8 @@ import pymupdf as fitz
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-SCRIPTS = ["junction_depth1_ids.py", "build_logical_segments.py", "compare_and_render_segments_v6.py"]
+SCRIPTS = ["junction_depth1_ids.py", "build_logical_segments.py", "compare_and_render_segments_v6.py",
+           "batch_compare.py", "harness_compare_app.py"]
 FS = 5.39
 FAILURES: list = []
 
@@ -371,6 +372,31 @@ def main() -> int:
                 got = (sm["changed"], sm["review"], sm["entire_branches_removed"], sm["entire_branches_added"])
             what = "no difference" if tag == "a" else "same findings as A vs B"
             check(got == exp, f"{vname}: A vs V({tag.upper()}) gives {what} (changed/review/removed/added {got})")
+    print("7. multi-page PDFs (page pairing, pages without a harness, best match)")
+    import batch_compare  # noqa: E402
+    check(batch_compare.plan_pairs(1, 3) == ([(0, 0), (0, 1), (0, 2)], [], []), "auto: one page against every page")
+    check(batch_compare.plan_pairs(3, 1) == ([(0, 0), (1, 0), (2, 0)], [], []), "auto: every page against the one page")
+    check(batch_compare.plan_pairs(3, 2) == ([(0, 0), (1, 1)], [2], []), "auto: page by page, extra page only in A")
+    check(batch_compare.plan_pairs(2, 2, "all-pairs") == ([(0, 0), (0, 1), (1, 0), (1, 1)], [], []),
+          "all-pairs: every page against every page")
+    multi = os.path.join(tmp, "multi.pdf")                 # [B, A, a page without a harness]
+    doc = fitz.open()
+    for src in (pb, pa):
+        with fitz.open(src) as d:
+            doc.insert_pdf(d)
+    doc.new_page(width=600, height=400).insert_text((50, 80), "PARTS LIST - no harness on this page", fontsize=12)
+    doc.save(multi)
+    doc.close()
+    res = batch_compare.run_batch(pa, multi, os.path.join(tmp, "batch"), "auto", 1.0, log=lambda s: None)
+    rows = {(r["page_a"], r["page_b"]): r for r in res["pairs"]}
+    check(set(rows) == {(1, 1), (1, 2), (1, 3)}, "the single page is compared with all 3 pages")
+    r = rows.get((1, 2), {})
+    check(r.get("status") == "no differences" and bool(r.get("best_match")), "the identical page is the best match")
+    r = rows.get((1, 1), {})
+    check(r.get("status") == "differences" and (r.get("summary") or {}).get("changed") == 2,
+          "the edited page shows its changes")
+    check(rows.get((1, 3), {}).get("status") == "skipped", "a page without a harness is skipped, the batch goes on")
+    check(os.path.isfile(os.path.join(tmp, "batch", "batch_summary.csv")), "batch summary written")
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) FAILED (work dir {tmp})")

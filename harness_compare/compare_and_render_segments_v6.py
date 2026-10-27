@@ -80,6 +80,12 @@ try:  # PyMuPDF >= 1.24 exposes "pymupdf"; older versions only "fitz".
 except ImportError:  # pragma: no cover
     import fitz  # type: ignore
 
+# Text boxes from nominal ascender / descender (0.8 / -0.2 of the font size) rather than
+# per-font corrections: the same box geometry for every font, and the same results whatever
+# PyMuPDF add-ons are installed (the layout and table add-ons switch this global on import).
+if hasattr(fitz, "TOOLS") and hasattr(fitz.TOOLS, "unset_quad_corrections"):
+    fitz.TOOLS.unset_quad_corrections(True)
+
 VERSION = "v6"
 
 # ===========================================================================
@@ -2717,6 +2723,8 @@ def parse_args(argv=None):
     ap.add_argument("--segments-b", required=True, help="Segment JSON generated from --pdf-b.")
     ap.add_argument("--out", required=True, help="Output directory.")
     ap.add_argument("--page", type=int, default=0, help="Zero-based page number (default 0).")
+    ap.add_argument("--page-a", type=int, help="Zero-based page of PDF A (default: --page).")
+    ap.add_argument("--page-b", type=int, help="Zero-based page of PDF B (default: --page).")
     ap.add_argument("--zoom", type=float, default=3.0, help="Rendering zoom (default 3.0).")
     ap.add_argument("--wire-width", default="auto",
                     help="Harness wire stroke width in pt, or 'auto' (default): the pen of the PDF lines under "
@@ -2766,8 +2774,10 @@ def main(argv=None) -> int:
         if not os.path.isfile(path):
             print(f"ERROR: {flag} file not found: {path}", file=sys.stderr)
             return 2
-    if args.page < 0:
-        print("ERROR: --page must be zero or positive", file=sys.stderr)
+    pages = {"A": args.page if args.page_a is None else args.page_a,
+             "B": args.page if args.page_b is None else args.page_b}
+    if min(pages.values()) < 0:
+        print("ERROR: page numbers must be zero or positive", file=sys.stderr)
         return 2
     if args.zoom <= 0:
         print("ERROR: --zoom must be positive", file=sys.stderr)
@@ -2783,10 +2793,10 @@ def main(argv=None) -> int:
         doc_a = fitz.open(args.pdf_a)
         doc_b = fitz.open(args.pdf_b)
         for tag, doc, path in (("A", doc_a, args.pdf_a), ("B", doc_b, args.pdf_b)):
-            if args.page >= doc.page_count:
-                raise ValueError(f"--page {args.page} out of range for PDF {tag} '{path}' "
+            if pages[tag] >= doc.page_count:
+                raise ValueError(f"page {pages[tag]} out of range for PDF {tag} '{path}' "
                                  f"({doc.page_count} page(s), zero-based)")
-        page_a, page_b = doc_a[args.page], doc_b[args.page]
+        page_a, page_b = doc_a[pages["A"]], doc_b[pages["B"]]
 
         A = process_pdf("A", args.pdf_a, args.segments_a, page_a, cfg)
         B = process_pdf("B", args.pdf_b, args.segments_b, page_b, cfg)
@@ -2837,7 +2847,7 @@ def main(argv=None) -> int:
                 "pdf_a": os.path.abspath(args.pdf_a), "pdf_b": os.path.abspath(args.pdf_b),
                 "pdf_a_sha256": A["sha256"], "pdf_b_sha256": B["sha256"],
                 "segments_a": os.path.abspath(args.segments_a), "segments_b": os.path.abspath(args.segments_b),
-                "page": args.page, "zoom": args.zoom,
+                "page": args.page, "page_a": pages["A"], "page_b": pages["B"], "zoom": args.zoom,
                 "ownership_check_a": A["ownership"], "ownership_check_b": B["ownership"],
                 "sheet_border_a": A["border"], "sheet_border_b": B["border"],
                 "calibration_a": A["profile"], "calibration_b": B["profile"],
