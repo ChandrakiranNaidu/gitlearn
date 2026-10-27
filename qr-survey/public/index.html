@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Get Your Free Guide</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="card">
+    <h1>Get your free guide</h1>
+    <p class="muted">Tell us a little about yourself and download the PDF instantly.</p>
+    <form method="post" action="/submit">
+      <label>Full name *
+        <input name="name" required autocomplete="name" maxlength="200">
+      </label>
+      <label>Phone number
+        <input name="phone" type="tel" autocomplete="tel" maxlength="50">
+      </label>
+      <label>Airline / Company
+        <input name="company" autocomplete="organization" maxlength="200">
+      </label>
+      <label>Email *
+        <input name="email" type="email" required autocomplete="email" maxlength="200">
+      </label>
+      <label>Pain points or interests
+        <textarea name="pain_points" rows="4" maxlength="3000" placeholder="What challenges are you facing, or what would you like to learn about?"></textarea>
+      </label>
+      <button class="btn" type="submit">Submit &amp; get the PDF</button>
+    </form>
+  </main>
+</body>
+</html>
