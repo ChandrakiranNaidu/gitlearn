@@ -25,3 +25,4 @@ input:focus, textarea:focus { outline: 2px solid #1f6feb; border-color: transpar
 }
 .btn:hover { background: #1858c4; }
 code { word-break: break-all; }
+.qr svg { width: 100%; max-width: 320px; height: auto; }

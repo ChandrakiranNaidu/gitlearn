@@ -2,15 +2,15 @@
   "name": "qr-survey",
   "version": "1.0.0",
   "description": "QR code survey that collects lead details and unlocks a PDF download",
-  "main": "server.js",
+  "private": true,
   "scripts": {
-    "start": "node server.js"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "express": "^4.22.3",
-    "qrcode": "^1.5.4"
+    "qrcode-generator": "^2.0.4"
   },
-  "private": true
+  "devDependencies": {
+    "wrangler": "^4.153.0"
+  }
 }

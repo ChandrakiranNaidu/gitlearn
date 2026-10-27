@@ -1,7 +1,7 @@
-# QR Survey → PDF download
+# QR Survey → PDF download (free, Cloudflare)
 
 People scan a QR code, fill in a short form (Name, Phone, Airline/Company, Email, Pain points/interests),
-and then download your PDF. Every submission is saved to a CSV you can download from the admin page.
+and then download your PDF. Every submission is saved, and you can download them all as a spreadsheet (CSV).
 
 | Page | What it does |
 |------|--------------|
@@ -9,37 +9,49 @@ and then download your PDF. Every submission is saved to a CSV you can download 
 | `/thanks` | Shown after submitting, with the **Download PDF** button |
 | `/admin` | Password protected: submission count, CSV export, printable QR code |
 
-## 1. Add your PDF
-Replace `files/brochure.pdf` with your document (keep the name, or set `PDF_FILE` / `PDF_NAME`). Commit and push.
+## Why Cloudflare
+- **Free:** the Workers free plan needs no credit card. 100,000 requests/day is far more than a few days of survey traffic.
+- **Atlanta:** Cloudflare runs the site in the data center closest to each visitor. People scanning in Atlanta are served from Cloudflare's Atlanta data center.
+  The small submissions database lives in one region; step 4 creates it in eastern North America (`enam`).
 
-## 2. Host it in Atlanta, GA (2–3 days)
-Recommended: **Vultr – Atlanta** (hourly billing; the $5–6/month plan costs well under $1 for 3 days).
-Linode/Akamai **Atlanta, GA** works the same way.
+## Put it online (about 10 minutes, one time)
 
-1. Create an account at vultr.com → **Deploy New Server**.
-2. Type: *Cloud Compute – Shared CPU*; Location: **Atlanta**; Image: **Ubuntu 24.04**; smallest plan (1 GB RAM).
-3. Under **Startup Script**, paste `deploy/startup-script.sh` after editing the values at the top
-   (`GITHUB_TOKEN` is needed only while the repo is private; `ADMIN_PASSWORD` is your admin password).
-4. Deploy. After ~3–5 minutes the site is at `https://<server-ip-with-dashes>.sslip.io`
-   (e.g. IP `45.32.10.5` → `https://45-32-10-5.sslip.io`). SSH in and `cat /root/SURVEY_URL.txt` to see it.
-5. Open `/admin` (any username + your password) → **Download QR as PNG** and print it.
+1. Install **Node.js LTS** (free): https://nodejs.org
+2. Get this folder onto your computer (download the repo as ZIP from GitHub, or `git clone`), and open a terminal in the `qr-survey` folder.
+3. Put **your PDF** at `public/files/brochure.pdf` (replace the placeholder).
+   To use a different file name, change `PDF_FILE` in `wrangler.jsonc`.
+4. Run these commands one by one:
 
-**When you're done:** download the CSV from `/admin`, then **Destroy** the server in Vultr
-(stopping it still bills; only destroying ends charges).
+   ```bash
+   npm install
+   npx wrangler login                                          # opens the browser: sign up / log in to Cloudflare (free, no card)
+   npx wrangler d1 create qr-survey --location=enam --binding DB   # database in eastern North America, saved into wrangler.jsonc
+   npx wrangler deploy                                         # publishes the site
+   npx wrangler secret put ADMIN_PASSWORD                      # type the password you want for /admin
+   ```
 
-## Run locally
-```bash
-npm install
-ADMIN_PASSWORD=secret npm start   # http://localhost:3000
-```
+   - The first deploy may ask you to pick a `workers.dev` subdomain. Any name is fine.
+   - At the end it prints your link, like `https://qr-survey.<your-subdomain>.workers.dev`.
 
-## Settings (environment variables)
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `PORT` | `3000` | Port to listen on |
-| `PUBLIC_URL` | `http://localhost:PORT` | URL encoded in the QR code |
-| `ADMIN_PASSWORD` | `change-me` | Password for `/admin` |
-| `PDF_FILE` / `PDF_NAME` | `files/brochure.pdf` | PDF served and its download filename |
-| `TOKEN_SECRET` | random per start | Signs download links |
+5. Open `https://qr-survey.<your-subdomain>.workers.dev/admin` (any username, the password you just set).
+   Click **Download QR code**, then print it or put it on your slides/banner.
 
-Submissions are stored in `data/submissions.csv` on the server (not in git).
+## When the event is over
+1. Go to `/admin` → **Download submissions (CSV)** and open it in Excel.
+2. Take everything down:
+   ```bash
+   npx wrangler delete
+   npx wrangler d1 delete qr-survey
+   ```
+   (Or leave it; the free plan does not expire or charge.)
+
+## Changing things later
+- Edit the form text in `public/index.html`, colors in `public/style.css`, or swap the PDF, then run `npx wrangler deploy` again.
+- Test on your own computer first: create a file `.dev.vars` containing `ADMIN_PASSWORD=test`, then run `npm run dev` and open http://localhost:8787
+
+## Troubleshooting
+- **Check the database was linked:** after the `d1 create` command, `wrangler.jsonc` should contain a
+  `"database_id"` line. If not, copy the `database_id` the command printed into the `d1_databases` entry
+  (`"database_id": "..."`) and deploy again. (If you skip `d1 create`, `deploy` still creates a database,
+  just in the region nearest to you instead of eastern North America.)
+- **/admin says "Set the ADMIN_PASSWORD secret first"**: run step 4's last command again.
