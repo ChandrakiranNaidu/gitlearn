@@ -446,6 +446,60 @@ def main() -> int:
     on_same = any("7520VC-A" in json.dumps(r) and "3LJ" in json.dumps(r)
                   for r in cl["same"] + cl["probable_same"])
     check(not on_same, "the renamed endpoint is not buried in a same / probable-same row")
+
+    print("9. a component symbol drawn mirrored is detected (handedness)")
+
+    def connector(path, lean):
+        """A wire between two terminals with an asymmetric parallelogram connector 7106VP.
+        lean > 0 leans one way, lean < 0 is its mirror image, lean == 0 is symmetric."""
+        d = fitz.open()
+        p = d.new_page(width=420, height=200)
+        y = 100
+        p.draw_line(fitz.Point(40, y), fitz.Point(380, y), color=(0, 0, 0), width=0.539)
+        for bx, nm in ((40, "7520VC-A"), (380, "6701VN-C")):
+            p.draw_rect(fitz.Rect(bx - 3, y - 3, bx + 3, y + 3), color=(0, 0, 0), width=0.674)
+            p.insert_text((bx - fitz.get_text_length(nm, fontname="helv", fontsize=FS) / 2, y - 6), nm,
+                          fontsize=FS, fontname="helv")
+        p.insert_text((120, y + 8), "38", fontsize=FS, fontname="helv")
+        p.insert_text((300, y + 8), "32", fontsize=FS, fontname="helv")
+        cx = 210
+        pts = [(cx - 6 + lean, y - 14), (cx + 6 + lean, y - 14), (cx + 6 - lean, y + 14),
+               (cx - 6 - lean, y + 14), (cx - 6 + lean, y - 14)]
+        p.draw_polyline([fitz.Point(*pp) for pp in pts], color=(0, 0, 0), width=0.674, closePath=True)
+        p.insert_text((cx - fitz.get_text_length("7106VP", fontname="helv", fontsize=FS) / 2, y - 20), "7106VP",
+                      fontsize=FS, fontname="helv")
+        d.save(path)
+        d.close()
+
+    def compare_conn(lean_b, label):
+        ea, eb = os.path.join(tmp, "cnA.pdf"), os.path.join(tmp, f"cn_{label}.pdf")
+        connector(ea, 10)
+        connector(eb, lean_b)
+        sd, od = os.path.join(tmp, f"cns_{label}"), os.path.join(tmp, f"cnc_{label}")
+        run([os.path.join(ROOT, "build_logical_segments.py"), "--pdf-a", ea, "--pdf-b", eb, "--out", sd, "--no-images"])
+        run([os.path.join(ROOT, "compare_and_render_segments_v6.py"), "--pdf-a", ea, "--pdf-b", eb,
+             "--segments-a", os.path.join(sd, "pdf_a_segments.json"),
+             "--segments-b", os.path.join(sd, "pdf_b_segments.json"), "--out", od, "--zoom", "1"])
+        return json.load(open(os.path.join(od, "segment_comparison_v6.json")))
+
+    cm = compare_conn(-10, "mirror")                        # mirrored connector -> changed
+    changes = [c for r in cm["changed"] for c in r["changes"]]
+    check(cm["summary"]["changed"] == 1 and any("7106VP" in c and "mirror" in c.lower() for c in changes),
+          "a mirrored connector symbol is reported as a change")
+    cs = compare_conn(10, "same")                           # identical connector -> no finding
+    check(cs["summary"]["changed"] == 0 and cs["summary"]["review"] == 0,
+          "an identically drawn connector is not a false positive")
+    csym_a, csym_b = os.path.join(tmp, "symA.pdf"), os.path.join(tmp, "symB.pdf")
+    connector(csym_a, 0)
+    connector(csym_b, 0)                                    # symmetric symbol: mirror is itself
+    run([os.path.join(ROOT, "build_logical_segments.py"), "--pdf-a", csym_a, "--pdf-b", csym_b,
+         "--out", os.path.join(tmp, "syms"), "--no-images"])
+    run([os.path.join(ROOT, "compare_and_render_segments_v6.py"), "--pdf-a", csym_a, "--pdf-b", csym_b,
+         "--segments-a", os.path.join(tmp, "syms", "pdf_a_segments.json"),
+         "--segments-b", os.path.join(tmp, "syms", "pdf_b_segments.json"), "--out", os.path.join(tmp, "symc"),
+         "--zoom", "1"])
+    symr = json.load(open(os.path.join(tmp, "symc", "segment_comparison_v6.json")))
+    check(symr["summary"]["changed"] == 0, "a symmetric symbol has no handedness to flag")
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) FAILED (work dir {tmp})")

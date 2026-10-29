@@ -566,9 +566,47 @@ def attach_annotations(ext: dict, segments: List[dict], sidx: "SegmentIndex",
     return attached, node_level
 
 
+def _wire_dir_at(poly, foot) -> Tuple[float, float]:
+    """Unit direction of the polyline edge nearest a point on it."""
+    best = None
+    for a, b in zip(poly, poly[1:]):
+        d, _ = eng.point_segment_distance(foot, a, b)
+        if best is None or d < best[0]:
+            best = (d, a, b)
+    if best is None:
+        return (1.0, 0.0)
+    return eng.unit((best[2][0] - best[1][0], best[2][1] - best[1][1]))
+
+
+def component_orientation(shape: dict, wire_dir: Tuple[float, float]) -> float:
+    """Handedness of a component symbol relative to its wire: the cross term of the symbol's
+    second moment in the (wire, perpendicular) frame, normalised by its spread.
+
+    The SIGN is the symbol's handedness and the magnitude how asymmetric it is.  It is invariant
+    to translation, scale, and rotation of the whole drawing (the frame follows the wire) and to
+    the direction the wire is traversed; it FLIPS SIGN when the symbol is drawn mirrored.  A
+    symbol that is symmetric about the wire or its perpendicular gives ~0 (no handedness).
+    """
+    pts = [p for seg in shape.get("segments", []) for p in seg]
+    if len(pts) < 4:
+        return 0.0
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    xh = wire_dir
+    yh = (-xh[1], xh[0])
+    num = den = 0.0
+    for px, py in pts:
+        u = (px - cx) * xh[0] + (py - cy) * xh[1]
+        v = (px - cx) * yh[0] + (py - cy) * yh[1]
+        num += u * v
+        den += u * u + v * v
+    return num / den if den > 1e-9 else 0.0
+
+
 def detect_inline_components(ext: dict, segments: List[dict], sidx: "SegmentIndex",
                              scfg: SegmentConfig) -> List[dict]:
     """Closed symbol shapes crossed by a wire inside a segment (connectors such as 7514VP)."""
+    shape_by_id = {sh["id"]: sh for sh in ext["vectors"]["shapes"]}
     texts = ext["texts"]
     tindex = eng.build_text_index(texts, numeric_only=False)
     out = []
@@ -609,9 +647,10 @@ def detect_inline_components(ext: dict, segments: List[dict], sidx: "SegmentInde
                     best = (dd, t)
             if best is None:
                 continue
+            orientation = component_orientation(shape_by_id.get(sh["id"], sh), _wire_dir_at(poly, foot))
             out.append({"segment_index": seg["segment_index"], "s": sv, "token": best[1]["norm"],
                         "text_ids": [best[1]["id"]], "shape_id": sh["id"], "attach_point": foot,
-                        "confidence": 0.8})
+                        "orientation": eng.rnd(orientation, 4), "confidence": 0.8})
     return out
 
 
@@ -788,7 +827,7 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig,
                     continue
                 items.append({"kind": "ELEMENT", "value": c["token"], "s": eng.rnd(c["s"]), "annotation": False,
                               "component": True, "text_ids": c["text_ids"], "shape_id": c["shape_id"],
-                              "point": D(c["attach_point"])})
+                              "orientation": c.get("orientation"), "point": D(c["attach_point"])})
             items.sort(key=lambda it: (it["s"], 0 if it["kind"] == "WIRE" else 1))
             sequence = [f"{it['kind']}:{it['value']}" for it in items]
             poly = s["polyline"]

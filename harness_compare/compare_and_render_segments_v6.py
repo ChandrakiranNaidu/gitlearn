@@ -169,6 +169,7 @@ class V6Config:
     topology_content_min: float = 0.75
     topology_endpoint_min: float = 0.55
     terminal_change_min_confidence: float = 0.6
+    component_orientation_min_strength: float = 0.15   # min handedness to call a symbol asymmetric
     # Sheet border (drawing frame, zone markers)
     border_detection: bool = True
     border_min_fraction: float = 0.6
@@ -1045,9 +1046,11 @@ def normalize_segment(raw: dict, i: int) -> dict:
             if tok is None:
                 continue
             s = it.get("s") if isinstance(it, dict) else None
+            ori = it.get("orientation") if isinstance(it, dict) else None
             items.append({"token": tok, "s": float(s) if isinstance(s, (int, float)) else None,
                           "text_id": it.get("text_id") if isinstance(it, dict) else None,
                           "annotation": is_annotation_token(tok),
+                          "orientation": float(ori) if isinstance(ori, (int, float)) else None,
                           "caption": it.get("caption") if isinstance(it, dict) else None})
     else:
         for tok in raw.get("sequence") or raw.get("contents") or []:
@@ -2029,11 +2032,35 @@ def classify_pair(sa: dict, sb: dict, pair: dict, ctx: dict, cfg: V6Config) -> d
             endpoint_reviews.append({"category": "endpoint_identity", "a_token": na, "b_token": nb,
                                      "a_type": ea["type"], "b_type": eb["type"],
                                      "description": f"endpoint identity may have changed: {na} vs {nb} ({why})"})
-    if identical and not endpoint_changes and not endpoint_reviews:
+    # --- component symbol orientation (a connector drawn mirrored) --------------------
+    # Connectivity is unchanged, but an asymmetric component drawn as its mirror image is a
+    # real, meaningful change (pin/keying orientation). Handedness is traversal-invariant, so
+    # the sign is compared directly by component name.
+    orientation_changes = []
+    thr = cfg.component_orientation_min_strength
+
+    def comp_orient(seg: dict) -> Dict[str, float]:
+        m: Dict[str, float] = {}
+        for it in seg["orig_items"]:
+            o = it.get("orientation")
+            if o is not None and token_kind(it["token"]) == "ELEMENT":
+                v = token_value(it["token"])
+                if abs(o) >= abs(m.get(v, 0.0)):
+                    m[v] = o
+        return m
+
+    oa, ob = comp_orient(sa), comp_orient(sb)
+    for name in sorted(set(oa) & set(ob)):
+        da, db = oa[name], ob[name]
+        if abs(da) >= thr and abs(db) >= thr and da * db < 0:
+            orientation_changes.append({"category": "component", "token": name,
+                                        "description": f"component {name} is mirrored (symbol orientation reversed)"})
+
+    if identical and not endpoint_changes and not endpoint_reviews and not orientation_changes:
         cls = "same_exact" if ep["exact"] else "same_probable"
         if cls == "same_probable" and not notes:
             notes.append("endpoint identities differ slightly")
-    elif real or endpoint_changes:
+    elif real or endpoint_changes or orientation_changes:
         cls = "changed"
         reason = "Meaningful wire number / component / endpoint identity change."
     elif endpoint_reviews:
@@ -2056,8 +2083,9 @@ def classify_pair(sa: dict, sb: dict, pair: dict, ctx: dict, cfg: V6Config) -> d
         "wire_similarity": rnd(pair["wire"], 4), "match_gate": pair["gate"],
         "content_source": content_source, "content_reversed": content_reversed,
         "edit_script": script, "endpoint_changes": endpoint_changes, "endpoint_reviews": endpoint_reviews,
+        "orientation_changes": orientation_changes,
         "changes": [e["description"] for e in script if not e["uncertain"] and e["category"] != "annotation"]
-        + [e["description"] for e in endpoint_changes],
+        + [e["description"] for e in endpoint_changes] + [e["description"] for e in orientation_changes],
         "annotation_changes": [e["description"] for e in script if e["category"] == "annotation"],
         "uncertain_changes": [e["description"] for e in script if e["uncertain"] and e["category"] != "annotation"]
         + [e["description"] for e in endpoint_reviews],

@@ -178,6 +178,12 @@ Limits:
 * Angled pieces never claim a number; the neighbouring horizontal / vertical piece owns it.
 * Annotations (CLAMP, MARKER, ROUTE, LABEL, BRAID, SUPPORT) hang on leader lines and are
   treated as review-only content.
+* A component symbol's **handedness** is tracked. An asymmetric inline component (e.g. a
+  slanted connector) drawn as its mirror image is a `changed` finding ("component 7106VP is
+  mirrored"), even though its wires and connectivity are unchanged. The measure is the symbol's
+  second-moment cross term in the wire frame: invariant to page scale, rotation, de-skew and
+  the direction the wire is traversed, and zero for a symbol that is symmetric about the wire or
+  its perpendicular (so only a genuine mirror of an asymmetric symbol is flagged).
 
 All of these are applied in the displayed page frame (page `/Rotate` taken into account),
 straightened when the whole drawing is rotated off the page axes.
@@ -214,7 +220,7 @@ straightened when the whole drawing is rotated off the page axes.
 |---|---|---|
 | `same` (same exact) | endpoints and ordered contents identical | not drawn |
 | `probable_same` | contents identical; endpoints differ only in a junction signature, an UNLABELLED/OPEN index, or an unresolved (unnamed) terminal | not drawn |
-| `changed` | same logical segment, meaningful wire number / component / terminal identity changed | orange |
+| `changed` | same logical segment, meaningful wire number / component / terminal identity changed, or a component symbol drawn mirrored | orange |
 | `review` | annotation-only difference, extraction uncertainty, route merge / split, or an **endpoint identity that may have changed** (`endpoint_identity`) | yellow |
 | `removed` | segment of A with no compatible segment in B | red (PDF A image) |
 | `added` | segment of B with no compatible segment in A | green (PDF B image) |
