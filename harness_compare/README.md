@@ -213,9 +213,9 @@ straightened when the whole drawing is rotated off the page axes.
 | Category | Meaning | Image colour |
 |---|---|---|
 | `same` (same exact) | endpoints and ordered contents identical | not drawn |
-| `probable_same` | contents identical; endpoints differ slightly (junction signature, UNLABELLED, OPEN index, uncertain terminal) | not drawn |
+| `probable_same` | contents identical; endpoints differ only in a junction signature, an UNLABELLED/OPEN index, or an unresolved (unnamed) terminal | not drawn |
 | `changed` | same logical segment, meaningful wire number / component / terminal identity changed | orange |
-| `review` | annotation-only difference, extraction uncertainty, or route merge / split | yellow |
+| `review` | annotation-only difference, extraction uncertainty, route merge / split, or an **endpoint identity that may have changed** (`endpoint_identity`) | yellow |
 | `removed` | segment of A with no compatible segment in B | red (PDF A image) |
 | `added` | segment of B with no compatible segment in A | green (PDF B image) |
 

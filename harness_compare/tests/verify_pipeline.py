@@ -397,6 +397,55 @@ def main() -> int:
           "the edited page shows its changes")
     check(rows.get((1, 3), {}).get("status") == "skipped", "a page without a harness is skipped, the batch goes on")
     check(os.path.isfile(os.path.join(tmp, "batch", "batch_summary.csv")), "batch summary written")
+
+    print("8. an endpoint terminal identity change is never hidden inside 'same'")
+
+    def star(path, name, far=False):
+        """A junction with three legs; the top leg ends at a box terminal called `name`."""
+        d = fitz.open()
+        p = d.new_page(width=400, height=300)
+        J = (200, 150)
+        for end, wire in (((200, 60), "100"), ((90, 150), "101"), ((310, 150), "102")):
+            p.draw_line(fitz.Point(*J), fitz.Point(*end), color=(0, 0, 0), width=0.539)
+        p.draw_circle(fitz.Point(*J), 0.27, color=None, fill=(0, 0, 0), width=0)
+        p.draw_circle(fitz.Point(*J), 0.67, color=(0, 0, 0), width=0.1)
+        for x, s in ((150, "101"), (255, "102")):
+            p.insert_text((x, 146), s, fontsize=FS, fontname="helv")
+        p.insert_text((210, 112), "100", fontsize=FS, fontname="helv")
+        for bx, nm in ((84, "6700VN-B"), (316, "6701VN-C")):
+            p.draw_rect(fitz.Rect(bx - 3, 147, bx + 3, 153), color=(0, 0, 0), width=0.674)
+            p.insert_text((bx - fitz.get_text_length(nm, fontname="helv", fontsize=FS) / 2, 142), nm,
+                          fontsize=FS, fontname="helv")
+        p.draw_rect(fitz.Rect(197, 51, 203, 57), color=(0, 0, 0), width=0.674)          # top terminal box
+        p.insert_text((200 - fitz.get_text_length(name, fontname="helv", fontsize=FS) / 2,
+                       34 if far else 44), name, fontsize=FS, fontname="helv")           # far = low confidence
+        d.save(path)
+        d.close()
+
+    def compare_star(nameb, far):
+        ea, eb = os.path.join(tmp, "epA.pdf"), os.path.join(tmp, f"epB_{nameb}_{far}.pdf")
+        star(ea, "7520VC-A")
+        star(eb, nameb, far=far)
+        sd, od = os.path.join(tmp, f"eps_{nameb}_{far}"), os.path.join(tmp, f"epc_{nameb}_{far}")
+        run([os.path.join(ROOT, "build_logical_segments.py"), "--pdf-a", ea, "--pdf-b", eb, "--out", sd, "--no-images"])
+        run([os.path.join(ROOT, "compare_and_render_segments_v6.py"), "--pdf-a", ea, "--pdf-b", eb,
+             "--segments-a", os.path.join(sd, "pdf_a_segments.json"),
+             "--segments-b", os.path.join(sd, "pdf_b_segments.json"), "--out", od, "--zoom", "1"])
+        return json.load(open(os.path.join(od, "segment_comparison_v6.json")))
+
+    cc = compare_star("3LJ", far=False)                     # clear name change -> changed
+    sm = cc["summary"]
+    changes = [c for r in cc["changed"] for c in r["changes"]]
+    check(sm["changed"] == 1 and any("7520VC-A" in c and "3LJ" in c for c in changes),
+          "a confident endpoint rename (7520VC-A -> 3LJ) is reported as a change")
+    cl = compare_star("3LJ", far=True)                      # low-confidence name -> review, NOT same
+    sm = cl["summary"]
+    rtypes = {r.get("review_type") for r in cl["review"]}
+    check(sm["changed"] + sm["review"] >= 1 and "endpoint_identity" in rtypes,
+          "a low-confidence endpoint rename is surfaced for review, not hidden in 'same'")
+    on_same = any("7520VC-A" in json.dumps(r) and "3LJ" in json.dumps(r)
+                  for r in cl["same"] + cl["probable_same"])
+    check(not on_same, "the renamed endpoint is not buried in a same / probable-same row")
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) FAILED (work dir {tmp})")

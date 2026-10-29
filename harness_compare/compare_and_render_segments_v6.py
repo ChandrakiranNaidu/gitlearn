@@ -2008,30 +2008,44 @@ def classify_pair(sa: dict, sb: dict, pair: dict, ctx: dict, cfg: V6Config) -> d
         script.append(entry)
         {"real": real, "annotation": annot, "uncertain": uncertain}[flag].append(entry)
 
-    # --- terminal / element identity changes ------------------------------------------
-    endpoint_changes = []
+    # --- terminal / element identity changes at the segment ends ----------------------
+    # A confident, same-type name change is a "changed". A differing identity that is only
+    # low-confidence, or whose symbol / node type also changed (box terminal -> dashed symbol,
+    # terminal <-> element), is surfaced as a review rather than hidden inside "same".
+    endpoint_changes, endpoint_reviews = [], []
     ends_a = (sa["start"], sa["end"])
     ends_b = (sb["end"], sb["start"]) if ep["reversed"] else (sb["start"], sb["end"])
     for ea, eb in zip(ends_a, ends_b):
-        if ea["type"] in ("terminal", "element") and ea["type"] == eb["type"] and ea.get("name") and eb.get("name") \
-                and ea["name"] != eb["name"]:
-            ca, cb = float(ea.get("name_confidence") or 0), float(eb.get("name_confidence") or 0)
-            if min(ca, cb) >= cfg.terminal_change_min_confidence:
-                endpoint_changes.append({"category": ea["type"], "a_token": ea["name"], "b_token": eb["name"],
-                                         "description": f"{ea['type']} {ea['name']} changed to {eb['name']}"})
-    if identical and not endpoint_changes:
+        na, nb = ea.get("name"), eb.get("name")
+        if not (na and nb and na != nb and is_meaningful_identifier(na) and is_meaningful_identifier(nb)):
+            continue
+        ca, cb = float(ea.get("name_confidence") or 0), float(eb.get("name_confidence") or 0)
+        same_type = ea["type"] == eb["type"] and ea["type"] in ("terminal", "element")
+        if same_type and min(ca, cb) >= cfg.terminal_change_min_confidence:
+            endpoint_changes.append({"category": ea["type"], "a_token": na, "b_token": nb,
+                                     "description": f"{ea['type']} {na} changed to {nb}"})
+        else:
+            why = "symbol / node type also differs" if not same_type else "low-confidence identification"
+            endpoint_reviews.append({"category": "endpoint_identity", "a_token": na, "b_token": nb,
+                                     "a_type": ea["type"], "b_type": eb["type"],
+                                     "description": f"endpoint identity may have changed: {na} vs {nb} ({why})"})
+    if identical and not endpoint_changes and not endpoint_reviews:
         cls = "same_exact" if ep["exact"] else "same_probable"
         if cls == "same_probable" and not notes:
             notes.append("endpoint identities differ slightly")
     elif real or endpoint_changes:
         cls = "changed"
         reason = "Meaningful wire number / component / endpoint identity change."
+    elif endpoint_reviews:
+        cls = "review"
+        reason = "An endpoint terminal / element identity may have changed; confirm it."
     elif annot and not uncertain:
         cls, reason = "review", "Only text-derived annotations differ (not a confirmed physical change)."
     else:
         cls, reason = "review", "Differences are probably extraction / association uncertainty."
     if cls == "review":
-        review_type = "annotation_only" if annot and not uncertain else "extraction_uncertainty"
+        review_type = ("endpoint_identity" if endpoint_reviews and not (annot and not uncertain)
+                       else "annotation_only" if annot and not uncertain else "extraction_uncertainty")
     else:
         review_type = None
     return {
@@ -2041,11 +2055,12 @@ def classify_pair(sa: dict, sb: dict, pair: dict, ctx: dict, cfg: V6Config) -> d
         "content_similarity": rnd(content_sim, 4), "match_content_similarity": rnd(pair["content"], 4),
         "wire_similarity": rnd(pair["wire"], 4), "match_gate": pair["gate"],
         "content_source": content_source, "content_reversed": content_reversed,
-        "edit_script": script, "endpoint_changes": endpoint_changes,
+        "edit_script": script, "endpoint_changes": endpoint_changes, "endpoint_reviews": endpoint_reviews,
         "changes": [e["description"] for e in script if not e["uncertain"] and e["category"] != "annotation"]
         + [e["description"] for e in endpoint_changes],
         "annotation_changes": [e["description"] for e in script if e["category"] == "annotation"],
-        "uncertain_changes": [e["description"] for e in script if e["uncertain"] and e["category"] != "annotation"],
+        "uncertain_changes": [e["description"] for e in script if e["uncertain"] and e["category"] != "annotation"]
+        + [e["description"] for e in endpoint_reviews],
         "reason": reason, "notes": notes,
     }
 
