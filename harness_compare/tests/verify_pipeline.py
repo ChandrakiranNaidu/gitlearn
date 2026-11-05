@@ -500,6 +500,62 @@ def main() -> int:
          "--zoom", "1"])
     symr = json.load(open(os.path.join(tmp, "symc", "segment_comparison_v6.json")))
     check(symr["summary"]["changed"] == 0, "a symmetric symbol has no handedness to flag")
+
+    def trap_conn(path, left, right, n_left, n_right, wide_left, from_left=True):
+        """Wire between two terminals with a trapezium connector CONN-1 (wide end left or right)."""
+        d = fitz.open()
+        p = d.new_page(width=420, height=200)
+        y = 100
+        a, b = ((40, y), (380, y)) if from_left else ((380, y), (40, y))
+        p.draw_line(fitz.Point(*a), fitz.Point(*b), color=(0, 0, 0), width=0.539)
+        for bx, nm in ((40, left), (380, right)):
+            p.draw_rect(fitz.Rect(bx - 3, y - 3, bx + 3, y + 3), color=(0, 0, 0), width=0.674)
+            p.insert_text((bx - fitz.get_text_length(nm, fontname="helv", fontsize=FS) / 2, y - 6), nm,
+                          fontsize=FS, fontname="helv")
+        p.insert_text((117, y + 9), n_left, fontsize=FS, fontname="helv")
+        p.insert_text((297, y + 9), n_right, fontsize=FS, fontname="helv")
+        lh, rh = (14, 7) if wide_left else (7, 14)
+        pts = [(203, y - lh), (217, y - rh), (217, y + rh), (203, y + lh), (203, y - lh)]
+        p.draw_polyline([fitz.Point(*q) for q in pts], color=(0, 0, 0), width=0.674, closePath=True)
+        p.draw_line(fitz.Point(210, y - 16), fitz.Point(210, y + 16), color=(0, 0, 0), width=0.674)
+        p.insert_text((210 - fitz.get_text_length("CONN-1", fontname="helv", fontsize=FS) / 2, y - 20), "CONN-1",
+                      fontsize=FS, fontname="helv")
+        d.save(path)
+        d.close()
+
+    def compare_files(ea, eb, label):
+        sd, od = os.path.join(tmp, f"tps_{label}"), os.path.join(tmp, f"tpc_{label}")
+        run([os.path.join(ROOT, "build_logical_segments.py"), "--pdf-a", ea, "--pdf-b", eb, "--out", sd, "--no-images"])
+        run([os.path.join(ROOT, "compare_and_render_segments_v6.py"), "--pdf-a", ea, "--pdf-b", eb,
+             "--segments-a", os.path.join(sd, "pdf_a_segments.json"),
+             "--segments-b", os.path.join(sd, "pdf_b_segments.json"), "--out", od, "--zoom", "1"])
+        res = json.load(open(os.path.join(od, "segment_comparison_v6.json")))
+        return res["summary"], [c for r in res["changed"] for c in r["changes"]]
+
+    ta = os.path.join(tmp, "tA.pdf")
+    trap_conn(ta, "1001VC-A", "2002VC-B", "10", "11", wide_left=True)
+    cases = (                       # (label, file args, reversed?)
+        ("trap_rev", ("1001VC-A", "2002VC-B", "10", "11", False), True),
+        ("trap_same", ("1001VC-A", "2002VC-B", "10", "11", True), False),
+        # the same harness laid out mirror-image and traced from the other end: unchanged
+        ("trap_backwards_same", ("2002VC-B", "1001VC-A", "11", "10", False), False),
+        # mirror-image layout traced from the other end, wide end now facing the other terminal
+        ("trap_backwards_rev", ("2002VC-B", "1001VC-A", "11", "10", True), True),
+        # unnamed ends (no digits): the order of the wire numbers decides the direction
+        ("trap_unnamed_backwards_same", ("TERM-B", "TERM-A", "11", "10", False), False),
+    )
+    for label, args, expect_rev in cases:
+        tb = os.path.join(tmp, f"tB_{label}.pdf")
+        trap_conn(tb, *args)
+        ea = ta
+        if label.startswith("trap_unnamed"):
+            ea = os.path.join(tmp, "tA_unnamed.pdf")
+            trap_conn(ea, "TERM-A", "TERM-B", "10", "11", wide_left=True)
+        sm, changes = compare_files(ea, tb, label)
+        got_rev = any("CONN-1" in c and "reversed" in c for c in changes)
+        what = "reported as reversed" if expect_rev else "not flagged"
+        check(got_rev == expect_rev and sm["changed"] == (1 if expect_rev else 0),
+              f"trapezium connector, {label.replace('_', ' ')}: {what}")
     print()
     if FAILURES:
         print(f"{len(FAILURES)} check(s) FAILED (work dir {tmp})")

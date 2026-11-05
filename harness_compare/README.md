@@ -178,12 +178,20 @@ Limits:
 * Angled pieces never claim a number; the neighbouring horizontal / vertical piece owns it.
 * Annotations (CLAMP, MARKER, ROUTE, LABEL, BRAID, SUPPORT) hang on leader lines and are
   treated as review-only content.
-* A component symbol's **handedness** is tracked. An asymmetric inline component (e.g. a
-  slanted connector) drawn as its mirror image is a `changed` finding ("component 7106VP is
-  mirrored"), even though its wires and connectivity are unchanged. The measure is the symbol's
-  second-moment cross term in the wire frame: invariant to page scale, rotation, de-skew and
-  the direction the wire is traversed, and zero for a symbol that is symmetric about the wire or
-  its perpendicular (so only a genuine mirror of an asymmetric symbol is flagged).
+* A component symbol's **orientation** is tracked, so an inline component drawn the other way
+  round is a `changed` finding even though its wires and connectivity are unchanged. Two
+  measures are taken from the symbol outline in the wire's own frame:
+  * **which way it points along the wire** (e.g. which end of a trapezium connector is wide):
+    reported as "component X is reversed (now points the other way along the wire)". It is
+    measured relative to the direction each route is traced, and the comparison corrects for a
+    route traced the other way round, using the end terminals and, when those are unnamed, the
+    order of the wire numbers.
+  * **slant / handedness** (e.g. a parallelogram drawn as its mirror image): reported as
+    "component X is mirrored".
+
+  Both are unaffected by page scale, rotation and de-skew. They are zero for a symbol with no
+  such asymmetry, such as a rectangle or a circle, so only a genuinely turned or mirrored
+  asymmetric symbol is flagged.
 
 All of these are applied in the displayed page frame (page `/Rotate` taken into account),
 straightened when the whole drawing is rotated off the page axes.

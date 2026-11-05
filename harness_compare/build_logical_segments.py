@@ -603,6 +603,44 @@ def component_orientation(shape: dict, wire_dir: Tuple[float, float]) -> float:
     return num / den if den > 1e-9 else 0.0
 
 
+def component_axial(shape: dict, wire_dir: Tuple[float, float]) -> float:
+    """Which way a component symbol points ALONG its wire, e.g. which end of a trapezium is wide.
+
+    Third moment sum(u * v^2) of points spaced evenly around the outline, where u runs along the
+    wire (in the direction the route is traced, start -> end) and v across it, normalised to be
+    scale-free. Negative = the symbol is wider / heavier towards the route start, positive =
+    towards the route end. Invariant to page scale and rotation and to a mirror across the wire;
+    it changes sign when the symbol is turned end for end, and also when the route is traced
+    the other way (the comparison corrects for that). ~0 for a symbol symmetric across the wire's
+    perpendicular (rectangle, circle, parallelogram).
+    """
+    segs = [(a, b) for a, b in shape.get("segments", []) if eng.dist(a, b) > 1e-9]
+    if not segs:
+        return 0.0
+    perimeter = sum(eng.dist(a, b) for a, b in segs)
+    step = perimeter / 96.0
+    samples = []                                          # (point, weight)
+    for a, b in segs:
+        n = max(1, int(math.ceil(eng.dist(a, b) / step)))
+        w = eng.dist(a, b) / n
+        for k in range(n):
+            t = (k + 0.5) / n
+            samples.append(((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])), w))
+    W = sum(w for _, w in samples)
+    cx = sum(p[0] * w for p, w in samples) / W
+    cy = sum(p[1] * w for p, w in samples) / W
+    xh = wire_dir
+    yh = (-xh[1], xh[0])
+    m3 = m2 = 0.0
+    for (px, py), w in samples:
+        u = (px - cx) * xh[0] + (py - cy) * xh[1]
+        v = (px - cx) * yh[0] + (py - cy) * yh[1]
+        m3 += w * u * v * v
+        m2 += w * (u * u + v * v)
+    r = math.sqrt(m2 / W) if m2 > 0 else 0.0
+    return (m3 / W) / (r ** 3) if r > 1e-9 else 0.0
+
+
 def detect_inline_components(ext: dict, segments: List[dict], sidx: "SegmentIndex",
                              scfg: SegmentConfig) -> List[dict]:
     """Closed symbol shapes crossed by a wire inside a segment (connectors such as 7514VP)."""
@@ -647,10 +685,12 @@ def detect_inline_components(ext: dict, segments: List[dict], sidx: "SegmentInde
                     best = (dd, t)
             if best is None:
                 continue
-            orientation = component_orientation(shape_by_id.get(sh["id"], sh), _wire_dir_at(poly, foot))
+            wdir = _wire_dir_at(poly, foot)
+            symbol = shape_by_id.get(sh["id"], sh)
             out.append({"segment_index": seg["segment_index"], "s": sv, "token": best[1]["norm"],
                         "text_ids": [best[1]["id"]], "shape_id": sh["id"], "attach_point": foot,
-                        "orientation": eng.rnd(orientation, 4), "confidence": 0.8})
+                        "orientation": eng.rnd(component_orientation(symbol, wdir), 4),
+                        "axial": eng.rnd(component_axial(symbol, wdir), 4), "confidence": 0.8})
     return out
 
 
@@ -827,7 +867,8 @@ def build_segments_for_pdf(pdf: str, page_no: int, cfg: eng.EngineConfig,
                     continue
                 items.append({"kind": "ELEMENT", "value": c["token"], "s": eng.rnd(c["s"]), "annotation": False,
                               "component": True, "text_ids": c["text_ids"], "shape_id": c["shape_id"],
-                              "orientation": c.get("orientation"), "point": D(c["attach_point"])})
+                              "orientation": c.get("orientation"), "axial": c.get("axial"),
+                              "point": D(c["attach_point"])})
             items.sort(key=lambda it: (it["s"], 0 if it["kind"] == "WIRE" else 1))
             sequence = [f"{it['kind']}:{it['value']}" for it in items]
             poly = s["polyline"]
