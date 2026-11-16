@@ -1,0 +1,793 @@
+<title>Nifty Alpha Lab</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout concept: a dark quant-research terminal — one centered 1100px column,
+   hairline-ruled sections, numbers in mono, one blue accent doing all the work. */
+:root {
+  --bg: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255,255,255,0.10);
+  --s1: #3987e5;         /* series 1: strategy (blue) */
+  --s2: #d95926;         /* series 2: benchmark (orange) */
+  --s3: #199e70;         /* series 3: aqua */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --up: #0ca30c;
+  --accent: #3987e5;
+  --accent-soft: rgba(57,135,229,0.14);
+  color-scheme: dark;
+  --font-d: "Archivo", system-ui, sans-serif;
+  --font-b: "Inter", system-ui, sans-serif;
+  --font-m: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a;
+    --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --up: #006300;
+    --accent: #2a78d6; --accent-soft: rgba(42,120,214,0.10);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b; --up: #006300;
+  --accent: #2a78d6; --accent-soft: rgba(42,120,214,0.10);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-b); font-size: 15px; line-height: 1.55;
+  margin: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 80px;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1100px; margin: 0 auto; }
+h1,h2,h3 { font-family: var(--font-d); text-wrap: balance; margin: 0; }
+.mono { font-family: var(--font-m); }
+.num { font-variant-numeric: tabular-nums; font-family: var(--font-m); }
+
+/* ---------- header ---------- */
+header { padding: 44px 0 0; }
+.eyebrow {
+  font-family: var(--font-m); font-size: 11.5px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--muted); display: flex;
+  flex-wrap: wrap; gap: 6px 14px; align-items: center;
+}
+.eyebrow .dot { color: var(--accent); }
+h1 { font-size: clamp(38px, 6vw, 62px); font-weight: 800; letter-spacing: -.02em; margin-top: 10px; }
+.sub { color: var(--ink-2); max-width: 62ch; margin-top: 12px; font-size: 16px; }
+.sub strong { color: var(--ink); font-weight: 600; }
+
+/* ---------- verdict hero ---------- */
+.verdict {
+  margin-top: 34px; border: 1px solid var(--border); border-radius: 14px;
+  background: linear-gradient(180deg, var(--accent-soft), transparent 60%) var(--surface);
+  overflow: hidden;
+}
+.verdict-head {
+  display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: baseline;
+  padding: 22px 26px 0;
+}
+.chip {
+  font-family: var(--font-m); font-size: 10.5px; letter-spacing: .12em;
+  text-transform: uppercase; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--ink-2); white-space: nowrap;
+}
+.chip.champion { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip.runner { color: var(--accent); border-color: var(--accent); }
+.chip.bench { color: var(--s2); border-color: currentColor; }
+.chip.pass { color: var(--good); border-color: currentColor; }
+.chip.fail { color: var(--critical); border-color: currentColor; }
+.verdict-head h2 { font-size: clamp(22px, 3.4vw, 30px); font-weight: 700; }
+.tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px; background: var(--border); border-block: 1px solid var(--border);
+  margin-top: 20px;
+}
+.tile { background: var(--surface); padding: 16px 26px 18px; }
+.tile .k { font-family: var(--font-m); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.tile .v { font-family: var(--font-m); font-weight: 600; font-size: clamp(24px, 3vw, 32px); margin-top: 6px; letter-spacing: -.01em; }
+.tile .d { font-size: 12.5px; color: var(--ink-2); margin-top: 4px; }
+.tile .v.up { color: var(--up); } .tile .v.accent { color: var(--accent); }
+.hero-chart { padding: 10px 16px 6px; }
+.chart-foot { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; padding: 0 26px 18px; color: var(--ink-2); font-size: 13px; }
+.legend { display: inline-flex; gap: 8px; align-items: center; }
+.swatch { width: 16px; height: 3px; border-radius: 2px; display: inline-block; }
+
+/* ---------- sections ---------- */
+section { margin-top: 72px; }
+.sec-head { display: flex; align-items: baseline; gap: 16px; border-bottom: 1px solid var(--baseline); padding-bottom: 12px; }
+.sec-head .idx { font-family: var(--font-m); color: var(--accent); font-size: 13px; }
+.sec-head h2 { font-size: clamp(22px, 3vw, 28px); font-weight: 700; }
+.sec-head .note { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--font-m); }
+.sec-sub { color: var(--ink-2); max-width: 68ch; margin-top: 14px; }
+
+/* ---------- leaderboard ---------- */
+.board-scroll { overflow-x: auto; margin-top: 22px; border: 1px solid var(--border); border-radius: 12px; }
+table.board { border-collapse: collapse; width: 100%; min-width: 860px; background: var(--surface); }
+.board th {
+  font-family: var(--font-m); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); text-align: right; padding: 12px 14px; border-bottom: 1px solid var(--baseline);
+  cursor: pointer; user-select: none; white-space: nowrap; position: sticky; top: 0; background: var(--surface);
+}
+.board th:first-child { text-align: left; }
+.board th .arr { color: var(--accent); }
+.board td { padding: 11px 14px; text-align: right; border-bottom: 1px solid var(--grid); font-size: 13.5px; }
+.board td:first-child { text-align: left; }
+.board tr:last-child td { border-bottom: 0; }
+.board tbody tr { cursor: pointer; transition: background .15s ease; }
+.board tbody tr:hover { background: var(--surface-2); }
+.board tbody tr.sel { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.b-name { font-weight: 600; font-family: var(--font-b); display: flex; gap: 10px; align-items: center; white-space: nowrap; }
+.ddbar { position: relative; height: 6px; width: 90px; background: var(--grid); border-radius: 3px; display: inline-block; vertical-align: middle; overflow: hidden; }
+.ddbar i { position: absolute; inset: 0 auto 0 0; background: var(--critical); border-radius: 3px; }
+.pos { color: var(--up); } .neg { color: var(--critical); }
+
+/* ---------- detail ---------- */
+.detail { margin-top: 26px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); overflow: hidden; }
+.detail-head { padding: 22px 26px 4px; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: baseline; }
+.detail-head h3 { font-size: 22px; font-weight: 700; }
+.detail-desc { padding: 0 26px; color: var(--ink-2); max-width: 75ch; }
+.detail-desc .how { margin-top: 10px; display: grid; gap: 8px; }
+.how-row { display: grid; grid-template-columns: 92px 1fr; gap: 12px; font-size: 13.5px; }
+.how-row b { font-family: var(--font-m); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); font-weight: 600; padding-top: 2px; }
+.detail-grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 0; margin-top: 18px; border-top: 1px solid var(--baseline); }
+.detail-grid > div { min-width: 0; padding: 18px 20px; }
+.detail-grid > div + div { border-left: 1px solid var(--grid); }
+.panel-k { font-family: var(--font-m); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); display:flex; align-items:center; gap:12px; flex-wrap: wrap; }
+.toggle { margin-left: auto; display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+.toggle button {
+  all: unset; font-family: var(--font-m); font-size: 11px; padding: 4px 10px; cursor: pointer;
+  color: var(--muted); letter-spacing: .06em;
+}
+.toggle button.on { background: var(--accent-soft); color: var(--accent); }
+.toggle button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mrows { display: grid; gap: 0; margin-top: 8px; }
+.mrow { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--grid); font-size: 13px; align-items: baseline; }
+.mrow:last-child { border-bottom: 0; }
+.mrow .lab { color: var(--ink-2); }
+.mrow .col { font-family: var(--font-m); min-width: 64px; text-align: right; }
+.mrow.hd .col { color: var(--muted); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; }
+@media (max-width: 760px) { .detail-grid { grid-template-columns: 1fr; } .detail-grid > div + div { border-left: 0; border-top: 1px solid var(--grid); } .how-row { grid-template-columns: 1fr; gap: 2px; } }
+
+/* ---------- heatmap ---------- */
+.heat-scroll { overflow-x: auto; margin-top: 22px; border: 1px solid var(--border); border-radius: 12px; }
+table.heat { border-collapse: collapse; background: var(--surface); min-width: 920px; width: 100%; }
+.heat th { font-family: var(--font-m); font-size: 10.5px; color: var(--muted); padding: 8px 6px; font-weight: 500; }
+.heat th.rowh { text-align: left; padding-left: 14px; white-space: nowrap; font-size: 12px; color: var(--ink-2); position: sticky; left: 0; background: var(--surface); }
+.heat td { padding: 0; }
+.heat .cell {
+  margin: 2px; height: 26px; border-radius: 4px; display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-m); font-size: 10px; min-width: 40px; cursor: default;
+  transition: transform .12s ease;
+}
+.heat .cell:hover { transform: scale(1.12); }
+
+/* ---------- anatomy / holdings ---------- */
+.anatomy { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 24px; }
+.step { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 18px; }
+.step .n { font-family: var(--font-m); color: var(--accent); font-size: 12px; }
+.step h3 { font-size: 16px; margin-top: 6px; }
+.step p { color: var(--ink-2); font-size: 13.5px; margin: 8px 0 0; }
+.holdings { margin-top: 26px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 20px 22px; }
+.hold-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.hold-chips .chip { font-size: 12px; letter-spacing: .04em; text-transform: none; padding: 6px 12px; background: var(--surface-2); border-color: var(--grid); color: var(--ink); }
+.hold-chips .chip b { color: var(--accent); font-weight: 600; margin-left: 6px; }
+
+/* ---------- method ---------- */
+.method { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; margin-top: 24px; }
+.m-card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 18px; }
+.m-card h3 { font-size: 15px; display: flex; gap: 8px; align-items: center; }
+.m-card p { color: var(--ink-2); font-size: 13.5px; margin: 8px 0 0; }
+.m-card .ic { color: var(--accent); font-family: var(--font-m); }
+.caveat { margin-top: 20px; border: 1px solid var(--warning); border-radius: 12px; padding: 16px 18px; font-size: 13.5px; color: var(--ink-2); background: var(--surface); }
+.caveat b { color: var(--ink); }
+footer { margin-top: 70px; padding-top: 18px; border-top: 1px solid var(--baseline); color: var(--muted); font-size: 12.5px; font-family: var(--font-m); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+
+/* ---------- charts & tooltip ---------- */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; }
+.tip {
+  position: fixed; pointer-events: none; z-index: 50; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; font-size: 12px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); opacity: 0; transition: opacity .1s ease; max-width: 260px;
+}
+.tip .t-date { font-family: var(--font-m); color: var(--muted); font-size: 11px; }
+.tip .t-row { display: flex; gap: 8px; align-items: center; margin-top: 3px; white-space: nowrap; }
+.tip .t-row .num { margin-left: auto; font-weight: 600; }
+.tip .sw { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+
+/* ---------- motion ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  .reveal { animation: rise .7s cubic-bezier(.2,.7,.2,1) both; }
+  @keyframes rise { from { opacity: .001; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+  .draw path.anim { stroke-dasharray: var(--len); stroke-dashoffset: var(--len); animation: draw 1.6s cubic-bezier(.4,0,.2,1) .25s forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .tile .v { transition: color .3s; }
+}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow reveal">
+    <span>NSE · Nifty 50</span><span class="dot">●</span>
+    <span>49 stocks</span><span class="dot">●</span>
+    <span>2007 – 2026</span><span class="dot">●</span>
+    <span>4,921 sessions</span><span class="dot">●</span>
+    <span>16 algorithms tested</span>
+  </div>
+  <h1 class="reveal" style="animation-delay:.06s">Nifty Alpha Lab</h1>
+  <p class="sub reveal" style="animation-delay:.12s">A systematic hunt for a trading algorithm that makes
+  <strong>consistent profits</strong> on Nifty 50 stocks: 19 years of adjusted daily data, real NSE trading
+  costs, and an honest in-sample / out-of-sample split. Nine strategy families went in. One came out on top.</p>
+
+  <div class="verdict reveal" style="animation-delay:.2s">
+    <div class="verdict-head">
+      <span class="chip champion">Champion</span>
+      <h2>Momentum Blend · Band-22</h2>
+      <span class="chip">monthly rebalance</span>
+      <span class="chip">long-only · top 10</span>
+    </div>
+    <div class="tiles" id="heroTiles"></div>
+    <div class="hero-chart"><div class="chart" id="heroChart"></div></div>
+    <div class="chart-foot">
+      <span class="legend"><i class="swatch" style="background:var(--s1)"></i>Momentum Blend Band-22</span>
+      <span class="legend"><i class="swatch" style="background:var(--s2)"></i>Buy &amp; hold, equal weight</span>
+      <span id="heroGrow" class="mono" style="margin-left:auto"></span>
+    </div>
+  </div>
+</header>
+
+<section id="hunt">
+  <div class="sec-head"><span class="idx">01</span><h2>The hunt — every algorithm tested</h2><span class="note">net of 25 bps/side costs</span></div>
+  <p class="sec-sub">Each strategy was simulated with the same engine: signals on the close, execution the next bar,
+  costs on every rupee traded, idle cash earning the liquid-fund rate. Parameters were tuned only on
+  2008–2017; the 2018–2026 column is untouched validation. Click a row to dissect it. Click a column header to re-sort.</p>
+  <div class="board-scroll"><table class="board">
+    <thead id="boardHead"></thead><tbody id="boardBody"></tbody>
+  </table></div>
+
+  <div class="detail" id="detail">
+    <div class="detail-head">
+      <h3 id="dName"></h3><span id="dChip"></span><span class="chip" id="dFam"></span>
+    </div>
+    <div class="detail-desc" id="dDesc"></div>
+    <div class="detail-grid">
+      <div>
+        <div class="panel-k">Growth of ₹1 <span id="dVsBench"></span>
+          <span class="toggle" role="group" aria-label="scale">
+            <button id="scLog" class="on">log</button><button id="scLin">linear</button>
+          </span>
+        </div>
+        <div class="chart" id="dEquity" style="margin-top:8px"></div>
+        <div class="panel-k" style="margin-top:18px">Drawdown from peak</div>
+        <div class="chart" id="dDraw" style="margin-top:8px"></div>
+      </div>
+      <div>
+        <div class="panel-k">Scorecard</div>
+        <div class="mrows" id="dMetrics"></div>
+        <div class="panel-k" style="margin-top:18px">Calendar-year returns</div>
+        <div class="chart" id="dYears" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="years">
+  <div class="sec-head"><span class="idx">02</span><h2>Year by year</h2><span class="note">net annual return</span></div>
+  <p class="sec-sub">Consistency is the whole game: a strategy you can hold is one that rarely hands you a losing
+  year and never a lost decade. Blue is a profitable year, red a losing one.</p>
+  <div class="heat-scroll"><table class="heat" id="heat"></table></div>
+</section>
+
+<section id="winner">
+  <div class="sec-head"><span class="idx">03</span><h2>Inside the champion</h2><span class="note">mechanics</span></div>
+  <p class="sec-sub">Momentum Blend Band-22 is cross-sectional momentum with three refinements that earn their
+  keep: a blended signal, a lazy exit, and a breadth-driven brake. On every month's last session it does four things:</p>
+  <div class="anatomy">
+    <div class="step"><div class="n">STEP 1 / RANK</div><h3>Blend three horizons</h3>
+      <p>Every stock is ranked by its 3-month, 6-month and 12-month return — each skipping the most
+      recent month to dodge short-term reversal — and the three percentile ranks are averaged into one score.</p></div>
+    <div class="step"><div class="n">STEP 2 / GATE</div><h3>Demand absolute momentum</h3>
+      <p>A stock qualifies only if its 12-1 month return is positive. Relative winners in a falling
+      market don't make the cut; their slots sit in cash instead.</p></div>
+    <div class="step"><div class="n">STEP 3 / HOLD</div><h3>Buy 10, sell at rank 22</h3>
+      <p>The top 10 scores are held at 10% each — but an existing holding is kept until it decays past
+      rank 22. The band cuts turnover roughly in half, and turnover is where backtests go to die.</p></div>
+    <div class="step"><div class="n">STEP 4 / BRAKE</div><h3>Scale out with breadth</h3>
+      <p>When fewer stocks trade above their own 200-day average, the whole book scales toward cash
+      (fully invested above 50% breadth, flat below 20%). Cash earns the liquid-fund rate. This is
+      what turned 2008 from −27% into +2%.</p></div>
+  </div>
+  <div class="holdings">
+    <div class="panel-k">What it holds right now <span class="mono" id="holdAsof" style="margin-left:auto"></span></div>
+    <div class="hold-chips" id="holdChips"></div>
+  </div>
+</section>
+
+<section id="method">
+  <div class="sec-head"><span class="idx">04</span><h2>Methodology &amp; honesty</h2><span class="note">read before believing</span></div>
+  <div class="method">
+    <div class="m-card"><h3><span class="ic">◆</span>No look-ahead</h3><p>Signals use only each day's close;
+      execution happens on the next bar. Stocks become eligible only after 252 bars of listed history.</p></div>
+    <div class="m-card"><h3><span class="ic">◆</span>Real NSE costs</h3><p>25 basis points per side — brokerage,
+      STT, stamp duty and impact — charged on all turnover. Idle cash earns 5% p.a. in a liquid fund.</p></div>
+    <div class="m-card"><h3><span class="ic">◆</span>IS / OOS discipline</h3><p>All parameter choices (horizons,
+      band width, breadth thresholds) were ranked on 2008–2017 in-sample data only. 2018–2026 was touched
+      once, as validation.</p></div>
+    <div class="m-card"><h3><span class="ic">◆</span>Total-return data</h3><p>Prices are split- and
+      dividend-adjusted daily series for 49 current constituents, 2007–2026, sourced from Twelve Data (NSE).</p></div>
+  </div>
+  <div class="caveat"><b>Survivorship bias, declared:</b> the universe is <i>today's</i> Nifty 50. Companies
+  that fell out of the index along the way are missing, which flatters absolute returns for the strategies
+  <b>and</b> the buy-and-hold benchmark alike — relative comparisons are the fair read. Past performance is
+  not a promise; this is research, not investment advice.</div>
+</section>
+
+<footer>
+  <span>Nifty Alpha Lab</span><span>engine: backtest-lab (python / pandas)</span>
+  <span>data through <span id="footEnd"></span></span><span style="margin-left:auto">built with Claude</span>
+</footer>
+</div>
+<div class="tip" id="tip" aria-hidden="true"></div>
+
+<script type="application/json" id="bt-data">__DATA__</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("bt-data").textContent);
+const META = DATA.meta;
+const BYKEY = Object.fromEntries(DATA.strategies.map(s => [s.key, s]));
+const WINNER = BYKEY[META.winner], BENCH = BYKEY.buy_hold;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const fmtPct = (v, s=1) => (v>0?"+":"") + (v*100).toFixed(s) + "%";
+const fmtPctU = (v, s=1) => (v*100).toFixed(s) + "%";
+const inr = v => { // growth of 1 lakh
+  const amt = v * 100000;
+  if (amt >= 1e7) return "₹" + (amt/1e7).toFixed(2) + " Cr";
+  if (amt >= 1e5) return "₹" + (amt/1e5).toFixed(1) + " L";
+  return "₹" + Math.round(amt).toLocaleString("en-IN");
+};
+
+const VERDICT = {
+  mom_blend22: ["champion","Champion"], allweather: ["runner","Runner-up"], buy_hold: ["bench","Benchmark"],
+  sma_50_200: ["pass","Profitable"], mom_12_1_top10: ["pass","Profitable"], mom_6_1_top10: ["pass","Profitable"],
+  mom_12_1_top5: ["pass","Profitable"], mom_12_1_iv: ["pass","Profitable"], high52: ["fail","Rejected"],
+  rsi2_dip: ["fail","Rejected"], donchian: ["pass","Profitable"], mom_blend: ["pass","Profitable"],
+  low_vol: ["pass","Profitable"], mom_lowvol: ["pass","Profitable"], mom_blend_vt: ["pass","Profitable"],
+  mom_lowvol_vt: ["pass","Profitable"],
+};
+const FAMILY = {
+  buy_hold:"Passive", sma_50_200:"Trend", mom_12_1_top10:"Momentum", mom_6_1_top10:"Momentum",
+  mom_12_1_top5:"Momentum", mom_12_1_iv:"Momentum", high52:"Momentum", rsi2_dip:"Mean reversion",
+  donchian:"Breakout", mom_blend:"Momentum", low_vol:"Defensive", mom_lowvol:"Blend",
+  mom_blend_vt:"Overlay", mom_lowvol_vt:"Overlay", mom_blend22:"Momentum", allweather:"Blend",
+};
+const DESC = {
+  buy_hold: {sig:"Own every tradable stock in the universe, equal-weighted, rebalanced on the last session of each month.",
+    port:"~49 positions, fully invested at all times.", why:"The bar every active idea must clear. Its −43% drawdown in 2008 is the pain an investor must sit through to earn it."},
+  sma_50_200: {sig:"For each stock: hold while its 50-day average sits above its 200-day average (a golden cross); step aside into cash when it doesn't.",
+    port:"Equal slot per stock in the universe; empty slots stay in cash at 5%.", why:"Classic trend filter. It kept drawdowns shallow (−26%) but gave up too much upside after whipsaw years — profitable, never threatening."},
+  mom_12_1_top10: {sig:"Rank all stocks by their 12-month return skipping the last month; buy the 10 strongest with positive momentum.",
+    port:"10 × 10%, monthly rebalance, breadth brake to cash.", why:"The academic classic (Jegadeesh–Titman). Strong, but a hard top-10 cutoff churns ~190% a year and costs eat the edge."},
+  mom_6_1_top10: {sig:"Same construction with a 6-month lookback (1-month skip).",
+    port:"10 × 10%, monthly rebalance, breadth brake.", why:"Faster signal, more noise, more turnover. Clearly worse out-of-sample than 12-1 — rejected in favor of blending."},
+  mom_12_1_top5: {sig:"12-1 momentum concentrated into only the top 5 names.",
+    port:"5 × 20%, monthly.", why:"Highest in-sample CAGR of the simple variants (32%), but concentration doubles single-stock risk and it degraded badly out-of-sample. A classic overfit shape."},
+  mom_12_1_iv: {sig:"12-1 momentum top 10, weighted by inverse 3-month volatility instead of equally.",
+    port:"10 names, risk-tilted weights, monthly.", why:"Slightly smoother than equal weight but not enough to pay for itself. Kept as a control."},
+  high52: {sig:"Buy the 10 stocks trading closest to their own 52-week high.",
+    port:"10 × 10%, monthly, breadth brake.", why:"George &amp; Hwang's anomaly didn't survive Indian large-caps after costs: out-of-sample Sharpe fell to 0.32. Rejected."},
+  rsi2_dip: {sig:"Buy sharp 2-day dips (RSI-2 below 10) in stocks above their 200-day average; exit on the bounce or after 10 sessions.",
+    port:"Up to 10 concurrent dip positions, daily signals.", why:"The cautionary tale: a famous US pattern that loses money here. Daily churn at 50 bps round-trip turned a mild edge into −3% a year. Rejected without appeal."},
+  donchian: {sig:"Buy a stock when it clears its 55-day high; exit when it breaks its 20-day low (turtle rules).",
+    port:"Up to 10 breakout positions, daily signals.", why:"Honest but mediocre — breakouts in large caps are too well-watched. Profitable, far behind momentum."},
+  mom_blend: {sig:"Average the percentile ranks of 3-, 6- and 12-month returns (each skipping a month); top 10 with a rank-18 holding band and breadth brake.",
+    port:"10 × 10%, monthly, band exits.", why:"The prototype of the champion — blending horizons stabilised the signal, the band halved turnover."},
+  low_vol: {sig:"Own the 10 least volatile stocks of the past year, equal-weighted.",
+    port:"10 × 10%, monthly.", why:"The betting-against-volatility anomaly is real in India: 16 of 19 years positive with a −27% worst drawdown. Quietly excellent, and nearly uncorrelated with momentum."},
+  mom_lowvol: {sig:"One combined score: 60% momentum rank + 40% low-volatility rank, top 10 with a holding band.",
+    port:"10 × 10%, monthly.", why:"Blending in the signal proved weaker than blending in the portfolio (see All-Weather). Kept as a control."},
+  mom_blend_vt: {sig:"The momentum blend, with the whole book scaled so trailing realized volatility targets 15% a year.",
+    port:"0–100% invested, scales daily.", why:"Smoothest ride of the momentum family (−25% max drawdown) at the price of ~3 points of CAGR. The right tool if drawdown tolerance is the binding constraint."},
+  mom_lowvol_vt: {sig:"The 60/40 momentum × low-vol score under the same 15% volatility target.",
+    port:"0–100% invested, scales daily.", why:"Double defense muted returns without buying extra safety. Rejected in favor of simpler constructions."},
+  mom_blend22: {sig:"Blend 3/6/12-month percentile ranks (1-month skip) → require positive 12-1 momentum → buy top 10 → hold to rank 22 → scale with market breadth.",
+    port:"10 × 10% + cash sleeve at 5% p.a., monthly rebalance, ~150% annual turnover.", why:"The widest holding band tested was the single biggest improvement: it keeps winners through noise and starves the cost drag. Chosen on in-sample Sharpe; validated out-of-sample at 0.96 with every rolling 3-year window positive."},
+  allweather: {sig:"Two sleeves, rebalanced monthly: 50% in the momentum blend (band-22, breadth brake) and 50% in the 10 lowest-volatility stocks.",
+    port:"Up to 20 names; sleeves overlap rarely.", why:"Momentum wins trends, low-vol cushions crashes; the mix has the highest Sharpe of everything tested (1.30) and an out-of-sample Sharpe of 1.00. The champion beats it on raw CAGR; this is the one to hold if smoothness matters most."},
+};
+
+/* ---------------- tooltip ---------------- */
+const tip = document.getElementById("tip");
+function showTip(html, x, y) {
+  tip.innerHTML = html; tip.style.opacity = 1;
+  const r = tip.getBoundingClientRect();
+  const px = Math.min(Math.max(8, x + 14), innerWidth - r.width - 8);
+  const py = Math.min(Math.max(8, y - r.height - 10), innerHeight - r.height - 8);
+  tip.style.left = px + "px"; tip.style.top = py + "px";
+}
+const hideTip = () => tip.style.opacity = 0;
+
+/* ---------------- chart helpers ---------------- */
+function seriesFromEquity(obj) {
+  const pts = Object.entries(obj).map(([d, v]) => [new Date(d).getTime(), v]);
+  pts.sort((a,b)=>a[0]-b[0]); return pts;
+}
+function makeSVG(w, h) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  return svg;
+}
+function niceTicksLog(min, max) {
+  const t = []; let v = Math.pow(10, Math.floor(Math.log10(min)));
+  const steps = [1,2,5];
+  outer: for (let e=0; e<9; e++) for (const s of steps) {
+    const val = v * Math.pow(10,e) * s;
+    if (val > max*1.01) break outer;
+    if (val >= min*0.99) t.push(val);
+  }
+  return t.length >= 2 ? t : [min, max];
+}
+function niceTicksLin(min, max, n=5) {
+  const span = max-min, step = Math.pow(10, Math.floor(Math.log10(span/n)));
+  const err = span/n/step, m = err>=7.5?10:err>=3.5?5:err>=1.5?2:1, st = m*step;
+  const t=[]; for (let v=Math.ceil(min/st)*st; v<=max+1e-9; v+=st) t.push(v);
+  return t;
+}
+function yearTicks(t0, t1) {
+  const y0 = new Date(t0).getFullYear()+1, y1 = new Date(t1).getFullYear();
+  const span = y1-y0, step = span > 12 ? 3 : span > 6 ? 2 : 1, t=[];
+  for (let y=y0; y<=y1; y+=step) t.push([Date.UTC(y,0,1), String(y)]);
+  return t;
+}
+
+/* Multi-series line chart with crosshair tooltip. series: [{name,color,pts}] */
+function lineChart(el, series, {log=true, h=300, animate=false, endLabels=true, fmt=inr}={}) {
+  el.innerHTML = "";
+  const w = Math.max(el.clientWidth || 600, 320);
+  const padL = 46, padR = endLabels ? 70 : 14, padT = 12, padB = 24;
+  const all = series.flatMap(s=>s.pts);
+  const t0 = Math.min(...all.map(p=>p[0])), t1 = Math.max(...all.map(p=>p[0]));
+  let v0 = Math.min(...all.map(p=>p[1])), v1 = Math.max(...all.map(p=>p[1]));
+  if (log) { v0 = Math.max(v0, 0.05); }
+  const X = t => padL + (t-t0)/(t1-t0) * (w-padL-padR);
+  const Y = v => log
+    ? padT + (1 - (Math.log(v)-Math.log(v0))/(Math.log(v1)-Math.log(v0))) * (h-padT-padB)
+    : padT + (1 - (v-v0)/(v1-v0)) * (h-padT-padB);
+  const svg = makeSVG(w, h);
+  const ticks = log ? niceTicksLog(v0, v1) : niceTicksLin(v0, v1);
+  const g = (tag, at) => { const n = document.createElementNS(svg.namespaceURI, tag);
+    for (const k in at) n.setAttribute(k, at[k]); svg.appendChild(n); return n; };
+  for (const tv of ticks) {
+    const y = Y(tv); if (y < padT-1 || y > h-padB+1) continue;
+    g("line", {x1:padL, x2:w-padR, y1:y, y2:y, stroke:css("--grid"), "stroke-width":1});
+    const tx = g("text", {x:padL-8, y:y+3.5, "text-anchor":"end", fill:css("--muted"),
+      "font-size":10.5, "font-family":css("--font-m")});
+    tx.textContent = fmt===inr ? (tv>=1?tv.toFixed(0)+"×":tv.toFixed(1)+"×") : fmtPctU(tv,0);
+  }
+  for (const [tt, lab] of yearTicks(t0,t1)) {
+    const x = X(tt);
+    g("line", {x1:x, x2:x, y1:h-padB, y2:h-padB+4, stroke:css("--baseline")});
+    const tx = g("text", {x, y:h-padB+15, "text-anchor":"middle", fill:css("--muted"),
+      "font-size":10.5, "font-family":css("--font-m")});
+    tx.textContent = lab;
+  }
+  g("line", {x1:padL, x2:w-padR, y1:h-padB, y2:h-padB, stroke:css("--baseline")});
+  if (animate && !reduced) svg.classList.add("draw");
+  const endLabs = [];
+  for (const s of series) {
+    const d = s.pts.map((p,i)=>(i?"L":"M")+X(p[0]).toFixed(1)+" "+Y(p[1]).toFixed(1)).join("");
+    const path = g("path", {d, fill:"none", stroke:s.color, "stroke-width":s.w||2,
+      "stroke-linejoin":"round", "stroke-linecap":"round", opacity:s.op??1});
+    if (animate && !reduced) { const len = path.getTotalLength(); path.classList.add("anim");
+      path.style.setProperty("--len", len); }
+    // end labels collected, then de-overlapped after the loop
+    if (endLabels) {
+      const last = s.pts[s.pts.length-1];
+      endLabs.push({x:X(last[0])+6, y:Y(last[1])+4, color:s.color,
+        text: fmt===inr ? last[1].toFixed(1)+"×" : fmtPctU(last[1],0)});
+    }
+  }
+  // push apart end labels that would collide
+  endLabs.sort((a,b)=>a.y-b.y);
+  for (let i=1;i<endLabs.length;i++)
+    if (endLabs[i].y - endLabs[i-1].y < 13) endLabs[i].y = endLabs[i-1].y + 13;
+  for (const l of endLabs) {
+    const tx = g("text", {x:l.x, y:l.y, fill:l.color, "font-size":11,
+      "font-weight":600, "font-family":css("--font-m")});
+    tx.textContent = l.text;
+  }
+  // crosshair
+  const cross = g("line", {y1:padT, y2:h-padB, stroke:css("--baseline"), "stroke-dasharray":"3 3", opacity:0});
+  const dots = series.map(s => g("circle", {r:3.5, fill:s.color, stroke:css("--surface"), "stroke-width":2, opacity:0}));
+  const hit = g("rect", {x:padL, y:padT, width:w-padL-padR, height:h-padT-padB, fill:"transparent"});
+  const move = ev => {
+    const pt = ev.touches ? ev.touches[0] : ev;
+    const box = svg.getBoundingClientRect();
+    const fx = (pt.clientX - box.left) * (w / box.width);
+    const t = t0 + (fx - padL)/(w-padL-padR)*(t1-t0);
+    let html = "", date = null;
+    series.forEach((s,si) => {
+      let lo=0, hi=s.pts.length-1;
+      while (hi-lo>1){ const m=(lo+hi)>>1; (s.pts[m][0]<t)?lo=m:hi=m; }
+      const p = (t-s.pts[lo][0] < s.pts[hi][0]-t) ? s.pts[lo] : s.pts[hi];
+      date = date || p[0];
+      dots[si].setAttribute("cx", X(p[0])); dots[si].setAttribute("cy", Y(p[1]));
+      dots[si].setAttribute("opacity", 1);
+      html += `<div class="t-row"><span class="sw" style="background:${s.color}"></span>${s.name}<span class="num">${fmt(p[1])}</span></div>`;
+    });
+    cross.setAttribute("x1", X(date)); cross.setAttribute("x2", X(date)); cross.setAttribute("opacity",1);
+    const ds = new Date(date);
+    showTip(`<div class="t-date">${ds.toLocaleDateString("en-IN",{year:"numeric",month:"short"})}</div>`+html,
+      pt.clientX, pt.clientY);
+  };
+  const leave = () => { cross.setAttribute("opacity",0); dots.forEach(d=>d.setAttribute("opacity",0)); hideTip(); };
+  hit.addEventListener("mousemove", move); hit.addEventListener("touchmove", move, {passive:true});
+  hit.addEventListener("mouseleave", leave); hit.addEventListener("touchend", leave);
+  el.appendChild(svg);
+}
+
+/* Drawdown area chart */
+function ddChart(el, pts, color, {h=160}={}) {
+  el.innerHTML = "";
+  const w = Math.max(el.clientWidth || 600, 320);
+  const padL = 46, padR = 14, padT = 8, padB = 22;
+  const t0 = pts[0][0], t1 = pts[pts.length-1][0];
+  const v0 = Math.min(...pts.map(p=>p[1]))*1.08, v1 = 0;
+  const X = t => padL + (t-t0)/(t1-t0)*(w-padL-padR);
+  const Y = v => padT + (v1-v)/(v1-v0)*(h-padT-padB);
+  const svg = makeSVG(w,h);
+  const g = (tag, at) => { const n = document.createElementNS(svg.namespaceURI, tag);
+    for (const k in at) n.setAttribute(k, at[k]); svg.appendChild(n); return n; };
+  for (const tv of niceTicksLin(v0, 0, 3)) {
+    const y = Y(tv); if (y<padT||y>h-padB) continue;
+    g("line",{x1:padL,x2:w-padR,y1:y,y2:y,stroke:css("--grid")});
+    const tx=g("text",{x:padL-8,y:y+3.5,"text-anchor":"end",fill:css("--muted"),"font-size":10.5,"font-family":css("--font-m")});
+    tx.textContent = Math.round(tv*100)+"%";
+  }
+  for (const [tt,lab] of yearTicks(t0,t1)) {
+    const tx=g("text",{x:X(tt),y:h-padB+15,"text-anchor":"middle",fill:css("--muted"),"font-size":10.5,"font-family":css("--font-m")});
+    tx.textContent = lab;
+  }
+  const line = pts.map((p,i)=>(i?"L":"M")+X(p[0]).toFixed(1)+" "+Y(p[1]).toFixed(1)).join("");
+  g("path", {d:`${line} L ${X(t1)} ${Y(0)} L ${X(t0)} ${Y(0)} Z`, fill:color, opacity:.14});
+  g("path", {d:line, fill:"none", stroke:color, "stroke-width":1.8, "stroke-linejoin":"round"});
+  g("line",{x1:padL,x2:w-padR,y1:Y(0),y2:Y(0),stroke:css("--baseline")});
+  // min marker
+  let mi=0; pts.forEach((p,i)=>{ if(p[1]<pts[mi][1]) mi=i; });
+  g("circle",{cx:X(pts[mi][0]),cy:Y(pts[mi][1]),r:3.5,fill:color,stroke:css("--surface"),"stroke-width":2});
+  const tx=g("text",{x:Math.min(X(pts[mi][0])+8,w-56),y:Y(pts[mi][1])-6,fill:color,"font-size":11,"font-weight":600,"font-family":css("--font-m")});
+  tx.textContent = fmtPctU(pts[mi][1]);
+  const hit=g("rect",{x:padL,y:padT,width:w-padL-padR,height:h-padT-padB,fill:"transparent"});
+  hit.addEventListener("mousemove", ev=>{
+    const box=svg.getBoundingClientRect(); const fx=(ev.clientX-box.left)*(w/box.width);
+    const t=t0+(fx-padL)/(w-padL-padR)*(t1-t0);
+    let lo=0,hi=pts.length-1; while(hi-lo>1){const m=(lo+hi)>>1;(pts[m][0]<t)?lo=m:hi=m;}
+    const p=(t-pts[lo][0]<pts[hi][0]-t)?pts[lo]:pts[hi];
+    showTip(`<div class="t-date">${new Date(p[0]).toLocaleDateString("en-IN",{year:"numeric",month:"short"})}</div>
+      <div class="t-row">drawdown<span class="num">${fmtPctU(p[1])}</span></div>`, ev.clientX, ev.clientY);
+  });
+  hit.addEventListener("mouseleave", hideTip);
+  el.appendChild(svg);
+}
+
+/* Yearly bar chart */
+function yearBars(el, yearly, {h=190}={}) {
+  el.innerHTML = "";
+  const w = Math.max(el.clientWidth || 400, 300);
+  const years = Object.keys(yearly), vals = Object.values(yearly);
+  const padL = 40, padR = 8, padT = 10, padB = 22;
+  const v1 = Math.max(...vals, 0.02), v0 = Math.min(...vals, -0.02);
+  const Y = v => padT + (v1-v)/(v1-v0)*(h-padT-padB);
+  const bw = (w-padL-padR)/years.length;
+  const svg = makeSVG(w,h);
+  const g=(tag,at)=>{const n=document.createElementNS(svg.namespaceURI,tag);for(const k in at)n.setAttribute(k,at[k]);svg.appendChild(n);return n;};
+  for (const tv of niceTicksLin(v0,v1,4)) {
+    const y=Y(tv); if(y<padT||y>h-padB) continue;
+    g("line",{x1:padL,x2:w-padR,y1:y,y2:y,stroke:css("--grid")});
+    const tx=g("text",{x:padL-6,y:y+3.5,"text-anchor":"end",fill:css("--muted"),"font-size":10,"font-family":css("--font-m")});
+    tx.textContent=Math.round(tv*100)+"%";
+  }
+  years.forEach((yr,i)=>{
+    const v=vals[i], x=padL+i*bw+bw*0.18, width=bw*0.64;
+    const y=Math.min(Y(0),Y(v)), hh=Math.max(Math.abs(Y(v)-Y(0)),1.5);
+    const r=g("rect",{x,y,width,height:hh,rx:2.5,fill:v>=0?css("--s1"):css("--critical"),opacity:.92});
+    r.addEventListener("mousemove",ev=>showTip(
+      `<div class="t-date">${yr}</div><div class="t-row">return<span class="num">${fmtPct(v)}</span></div>`,
+      ev.clientX,ev.clientY));
+    r.addEventListener("mouseleave",hideTip);
+    if (i%3===0 || years.length<=10) {
+      const tx=g("text",{x:x+width/2,y:h-padB+14,"text-anchor":"middle",fill:css("--muted"),"font-size":9.5,"font-family":css("--font-m")});
+      tx.textContent = "’"+yr.slice(2);
+    }
+  });
+  g("line",{x1:padL,x2:w-padR,y1:Y(0),y2:Y(0),stroke:css("--baseline")});
+  el.appendChild(svg);
+}
+
+/* ---------------- hero ---------------- */
+const heroTiles = [
+  {k:"CAGR · 19 yrs net", v:WINNER.full.cagr, fmt:v=>fmtPctU(v), cls:"accent", d:`vs ${fmtPctU(BENCH.full.cagr)} buy &amp; hold`},
+  {k:"Sharpe ratio", v:WINNER.full.sharpe, fmt:v=>v.toFixed(2), cls:"accent", d:`vs ${BENCH.full.sharpe.toFixed(2)} buy &amp; hold`},
+  {k:"Max drawdown", v:WINNER.full.max_dd, fmt:v=>fmtPctU(v), cls:"", d:`vs ${fmtPctU(BENCH.full.max_dd)} buy &amp; hold`},
+  {k:"Rolling 3-yr windows +", v:WINNER.full.pos_3y, fmt:v=>Math.round(v*100)+"%", cls:"up", d:`worst 3-yr stretch ${fmtPct(WINNER.full.worst_3y,0)}`},
+  {k:"Positive years", v:null, txt:`${WINNER.full.pos_years}/${WINNER.full.n_years}`, cls:"", d:`2008 crash: ${fmtPct(WINNER.full.yearly["2008"],0)} vs ${fmtPct(BENCH.full.yearly["2008"],0)}`},
+];
+document.getElementById("heroTiles").innerHTML = heroTiles.map((t,i)=>`
+  <div class="tile reveal" style="animation-delay:${.28+i*.07}s">
+    <div class="k">${t.k}</div>
+    <div class="v ${t.cls}" data-i="${i}">${t.txt ?? t.fmt(t.v)}</div>
+    <div class="d">${t.d}</div>
+  </div>`).join("");
+if (!reduced) heroTiles.forEach((t,i)=>{
+  if (t.v==null) return;
+  const el=document.querySelector(`.tile .v[data-i="${i}"]`);
+  const t0=performance.now(), dur=1100+i*120;
+  const step=now=>{ const p=Math.min(1,(now-t0)/dur), e=1-Math.pow(1-p,3);
+    el.textContent=t.fmt(t.v*e); if(p<1) requestAnimationFrame(step); else el.textContent=t.fmt(t.v); };
+  requestAnimationFrame(step);
+});
+
+const winEq = seriesFromEquity(WINNER.equity), benchEq = seriesFromEquity(BENCH.equity);
+const heroDraw = () => lineChart(document.getElementById("heroChart"),
+  [{name:"Momentum Blend Band-22", color:css("--s1"), pts:winEq, w:2.4},
+   {name:"Buy & hold EW", color:css("--s2"), pts:benchEq, w:1.8, op:.85}],
+  {log:true, h:330, animate:true});
+heroDraw();
+document.getElementById("heroGrow").textContent =
+  `₹1 L in Jul 2008 → ${inr(winEq[winEq.length-1][1])} · log scale`;
+document.getElementById("footEnd").textContent = META.end;
+
+/* ---------------- leaderboard ---------------- */
+const COLS = [
+  ["name","Algorithm", s=>s.name, false],
+  ["fam","Family", s=>FAMILY[s.key], false],
+  ["cagr","CAGR", s=>s.full.cagr, true],
+  ["sharpe","Sharpe", s=>s.full.sharpe, true],
+  ["dd","Max DD", s=>s.full.max_dd, true],
+  ["oos","OOS Sharpe", s=>s.oos.sharpe, true],
+  ["posy","+Years", s=>s.full.pos_years, true],
+  ["to","Turnover", s=>s.turnover, true],
+  ["verdict","Verdict", s=>VERDICT[s.key][1], false],
+];
+let sortBy = "sharpe", sortDir = -1, selected = META.winner;
+function renderBoard() {
+  const rows = [...DATA.strategies].sort((a,b)=>{
+    const col = COLS.find(c=>c[0]===sortBy), va=col[2](a), vb=col[2](b);
+    return (typeof va==="string" ? va.localeCompare(vb) : va-vb) * sortDir;
+  });
+  document.getElementById("boardHead").innerHTML = "<tr>" + COLS.map(c=>
+    `<th data-c="${c[0]}">${c[1]}${sortBy===c[0]?` <span class="arr">${sortDir<0?"▾":"▴"}</span>`:""}</th>`).join("") + "</tr>";
+  document.getElementById("boardBody").innerHTML = rows.map(s=>{
+    const [vc, vt] = VERDICT[s.key];
+    return `<tr data-k="${s.key}" class="${s.key===selected?"sel":""}">
+      <td><span class="b-name"><i class="swatch" style="background:${s.key===selected?"var(--s1)":"transparent"};height:10px;width:4px"></i>${s.name}</span></td>
+      <td class="mono" style="color:var(--muted);font-size:11.5px">${FAMILY[s.key]}</td>
+      <td class="num ${s.full.cagr>=0?"":"neg"}">${fmtPctU(s.full.cagr)}</td>
+      <td class="num">${s.full.sharpe.toFixed(2)}</td>
+      <td class="num"><span class="ddbar"><i style="width:${Math.min(100,Math.abs(s.full.max_dd)/0.8*100)}%"></i></span> ${fmtPctU(s.full.max_dd,0)}</td>
+      <td class="num">${s.oos.sharpe.toFixed(2)}</td>
+      <td class="num">${s.full.pos_years}/${s.full.n_years}</td>
+      <td class="num">${Math.round(s.turnover*100)}%</td>
+      <td><span class="chip ${vc}">${vt}</span></td>
+    </tr>`;
+  }).join("");
+  document.querySelectorAll("#boardHead th").forEach(th=>th.addEventListener("click",()=>{
+    const c=th.dataset.c;
+    if (sortBy===c) sortDir*=-1; else { sortBy=c; sortDir = COLS.find(x=>x[0]===c)[3] ? -1 : 1; }
+    renderBoard();
+  }));
+  document.querySelectorAll("#boardBody tr").forEach(tr=>tr.addEventListener("click",()=>{
+    selected = tr.dataset.k; renderBoard(); renderDetail();
+    document.getElementById("detail").scrollIntoView({behavior: reduced?"auto":"smooth", block:"nearest"});
+  }));
+}
+
+/* ---------------- detail ---------------- */
+let logScale = true;
+function renderDetail() {
+  const s = BYKEY[selected], d = DESC[s.key], [vc,vt] = VERDICT[s.key];
+  document.getElementById("dName").textContent = s.name;
+  document.getElementById("dChip").innerHTML = `<span class="chip ${vc}">${vt}</span>`;
+  document.getElementById("dFam").textContent = FAMILY[s.key];
+  document.getElementById("dDesc").innerHTML = `
+    <div class="how">
+      <div class="how-row"><b>Signal</b><span>${d.sig}</span></div>
+      <div class="how-row"><b>Portfolio</b><span>${d.port}</span></div>
+      <div class="how-row"><b>Verdict</b><span>${d.why}</span></div>
+    </div>`;
+  const eq = seriesFromEquity(s.equity);
+  const series = [{name:s.name, color:css("--s1"), pts:eq, w:2.3}];
+  if (s.key!=="buy_hold") series.push({name:"Buy & hold EW", color:css("--s2"), pts:benchEq, w:1.6, op:.8});
+  document.getElementById("dVsBench").textContent = s.key!=="buy_hold" ? "· vs buy & hold" : "";
+  lineChart(document.getElementById("dEquity"), series, {log:logScale, h:260});
+  ddChart(document.getElementById("dDraw"), seriesFromEquity(s.drawdown), css("--s1"));
+  const m = (lab, f, fmt) => `<div class="mrow"><span class="lab">${lab}</span>
+    <span class="col num">${fmt(s.full[f])}</span><span class="col num">${fmt(s.insample[f])}</span><span class="col num">${fmt(s.oos[f])}</span></div>`;
+  document.getElementById("dMetrics").innerHTML =
+    `<div class="mrow hd"><span class="lab"></span><span class="col">Full</span><span class="col">IS 08-17</span><span class="col">OOS 18-26</span></div>` +
+    m("CAGR, net","cagr",v=>fmtPctU(v)) + m("Sharpe","sharpe",v=>v.toFixed(2)) +
+    m("Sortino","sortino",v=>v.toFixed(2)) + m("Volatility","vol",v=>fmtPctU(v,0)) +
+    m("Max drawdown","max_dd",v=>fmtPctU(v,0)) + m("Calmar","calmar",v=>v.toFixed(2)) +
+    `<div class="mrow"><span class="lab">Positive months</span><span class="col num">${fmtPctU(s.full.pct_pos_months,0)}</span><span class="col num">${fmtPctU(s.insample.pct_pos_months,0)}</span><span class="col num">${fmtPctU(s.oos.pct_pos_months,0)}</span></div>` +
+    `<div class="mrow"><span class="lab">Rolling 3-yr positive</span><span class="col num">${s.full.pos_3y!=null?fmtPctU(s.full.pos_3y,0):"—"}</span><span class="col num">—</span><span class="col num">—</span></div>`;
+  yearBars(document.getElementById("dYears"), s.full.yearly);
+}
+document.getElementById("scLog").addEventListener("click",()=>{ logScale=true; setScale(); });
+document.getElementById("scLin").addEventListener("click",()=>{ logScale=false; setScale(); });
+function setScale(){
+  document.getElementById("scLog").classList.toggle("on", logScale);
+  document.getElementById("scLin").classList.toggle("on", !logScale);
+  renderDetail();
+}
+
+/* ---------------- heatmap ---------------- */
+function heat() {
+  const years = Object.keys(BENCH.full.yearly);
+  const order = [...DATA.strategies].sort((a,b)=>b.full.sharpe-a.full.sharpe);
+  const lerp=(a,b,t)=>Math.round(a+(b-a)*t);
+  const mixHex=(h1,h2,t)=>{const p=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16));
+    const [r1,g1,b1]=p(h1),[r2,g2,b2]=p(h2);
+    return `rgb(${lerp(r1,r2,t)},${lerp(g1,g2,t)},${lerp(b1,b2,t)})`;};
+  const mid = css("--surface-2"), blue=css("--s1"), red=css("--critical");
+  const colorFor = v => {
+    const t = Math.min(1, Math.abs(v)/0.5);
+    if (Math.abs(v) < 0.005) return mid;
+    // blend from surface toward pole
+    const pole = v>0?blue:red;
+    const srf = getComputedStyle(document.body).backgroundColor;
+    return `color-mix(in oklab, ${pole} ${Math.round(14+t*86)}%, ${srf})`;
+  };
+  const inkFor = v => Math.abs(v) > 0.18 ? "#fff" : css("--ink-2");
+  let html = `<tr><th class="rowh">Strategy</th>${years.map(y=>`<th>’${y.slice(2)}</th>`).join("")}</tr>`;
+  for (const s of order) {
+    html += `<tr><th class="rowh">${s.name}</th>` + years.map(y=>{
+      const v = s.full.yearly[y];
+      return `<td><div class="cell" data-s="${s.name}" data-y="${y}" data-v="${v}"
+        style="background:${colorFor(v)};color:${inkFor(v)}">${Math.round(v*100)}</div></td>`;
+    }).join("") + "</tr>";
+  }
+  const tbl = document.getElementById("heat");
+  tbl.innerHTML = html;
+  tbl.querySelectorAll(".cell").forEach(c=>{
+    c.addEventListener("mousemove", ev=>showTip(
+      `<div class="t-date">${c.dataset.s} · ${c.dataset.y}</div>
+       <div class="t-row">annual return<span class="num">${fmtPct(+c.dataset.v)}</span></div>`,
+      ev.clientX, ev.clientY));
+    c.addEventListener("mouseleave", hideTip);
+  });
+}
+
+/* ---------------- holdings ---------------- */
+function holdings() {
+  document.getElementById("holdAsof").textContent = "as of " + META.holdings_asof;
+  document.getElementById("holdChips").innerHTML =
+    Object.entries(META.holdings).map(([s,w])=>
+      `<span class="chip">${s}<b>${Math.round(w*1000)/10}%</b></span>`).join("") +
+    (META.invested_fraction < 0.999
+      ? `<span class="chip">CASH<b>${Math.round((1-META.invested_fraction)*100)}%</b></span>` : "");
+}
+
+renderBoard(); renderDetail(); heat(); holdings();
+let rAF;
+addEventListener("resize", ()=>{ cancelAnimationFrame(rAF);
+  rAF=requestAnimationFrame(()=>{ heroDraw(); renderDetail(); }); });
+</script>
