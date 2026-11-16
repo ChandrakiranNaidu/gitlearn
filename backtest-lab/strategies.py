@@ -18,7 +18,7 @@ def _monthly(weights_at_rebal, index):
 def buy_hold_equal_weight(panel):
     """Benchmark: equal weight across tradable stocks, rebalanced monthly."""
     close = panel["close"]
-    ok = tradable_mask(close, 60)
+    ok = tradable_mask(close, 60, panel.get("member"))
     rebs = month_ends(close.index)
     rows = {}
     for d in rebs:
@@ -34,7 +34,7 @@ def sma_crossover(panel, fast=50, slow=200):
     """Per-stock trend following: hold (equal weight) stocks whose fast SMA is
     above slow SMA; otherwise that slot sits in cash."""
     close = panel["close"]
-    ok = tradable_mask(close, slow + 10)
+    ok = tradable_mask(close, slow + 10, panel.get("member"))
     f = close.rolling(fast).mean()
     s = close.rolling(slow).mean()
     sig = ((f > s) & ok).astype(float)
@@ -50,7 +50,7 @@ def xs_momentum(panel, lookback=252, skip=21, top_n=10, regime_sma=200,
     inverse-vol) weighted. Regime filter: scale into cash by the fraction of
     universe above its own regime_sma (breadth), if regime_sma given."""
     close = panel["close"]
-    ok = tradable_mask(close, lookback + skip + 10)
+    ok = tradable_mask(close, lookback + skip + 10, panel.get("member"))
     mom = close.shift(skip) / close.shift(lookback + skip) - 1
     vol = close.pct_change(fill_method=None).rolling(63).std()
     if regime_sma:
@@ -81,7 +81,7 @@ def xs_momentum(panel, lookback=252, skip=21, top_n=10, regime_sma=200,
 def high_52w(panel, top_n=10, regime_sma=200):
     """Buy stocks closest to their 52-week high (George-Hwang), monthly."""
     close = panel["close"]
-    ok = tradable_mask(close, 262)
+    ok = tradable_mask(close, 262, panel.get("member"))
     ratio = close / close.rolling(252).max()
     if regime_sma:
         above = (close > close.rolling(regime_sma).mean()) & ok
@@ -108,7 +108,7 @@ def mean_reversion_rsi(panel, rsi_len=2, buy_below=10, exit_above=70,
     RSI > exit_above or after max_hold days. Daily, equal weight across
     active signals capped at top_n slots."""
     close = panel["close"]
-    ok = tradable_mask(close, sma_filter + 10)
+    ok = tradable_mask(close, sma_filter + 10, panel.get("member"))
     delta = close.diff()
     up = delta.clip(lower=0).ewm(alpha=1 / rsi_len, adjust=False).mean()
     dn = (-delta.clip(upper=0)).ewm(alpha=1 / rsi_len, adjust=False).mean()
@@ -136,7 +136,7 @@ def donchian_breakout(panel, entry_len=55, exit_len=20, top_n=10):
     """Classic turtle-style breakout with ATR-free equal weighting."""
     close = panel["close"]
     high, low = panel["high"], panel["low"]
-    ok = tradable_mask(close, entry_len + 10)
+    ok = tradable_mask(close, entry_len + 10, panel.get("member"))
     upper = high.rolling(entry_len).max().shift(1)
     lower = low.rolling(exit_len).min().shift(1)
     arr = np.zeros(close.shape)
@@ -186,7 +186,7 @@ def mom_blend_bands(panel, top_n=10, hold_band=18, trend_gate=True,
     (close > 200 SMA) and index-breadth regime scaling.
     """
     close = panel["close"]
-    ok = tradable_mask(close, max(lb + sk for lb, sk in lbs) + 10)
+    ok = tradable_mask(close, max(lb + sk for lb, sk in lbs) + 10, panel.get("member"))
     moms = [close.shift(sk) / close.shift(lb + sk) - 1 for lb, sk in lbs]
     trend = close > close.rolling(200).mean()
     above = trend & ok
@@ -225,7 +225,7 @@ def mom_blend_bands(panel, top_n=10, hold_band=18, trend_gate=True,
 def low_vol(panel, top_n=10, vol_len=252):
     """Betting-against-volatility: hold the top_n least volatile stocks."""
     close = panel["close"]
-    ok = tradable_mask(close, vol_len + 10)
+    ok = tradable_mask(close, vol_len + 10, panel.get("member"))
     vol = close.pct_change(fill_method=None).rolling(vol_len).std()
     rebs = month_ends(close.index)
     rows = {}
@@ -244,7 +244,7 @@ def low_vol(panel, top_n=10, vol_len=252):
 def mom_lowvol(panel, top_n=10, hold_band=18):
     """Blend: average of momentum rank and low-volatility rank."""
     close = panel["close"]
-    ok = tradable_mask(close, 300)
+    ok = tradable_mask(close, 300, panel.get("member"))
     mom = close.shift(21) / close.shift(273) - 1
     vol = close.pct_change(fill_method=None).rolling(252).std()
     trend = close > close.rolling(200).mean()
@@ -295,9 +295,9 @@ STRATEGIES.update({
 })
 
 
-def combo_mom_lowvol(panel, mshare=0.5, top_n=10, hold_band=22):
-    """FINAL CANDIDATE 'All-Weather Nifty': 50% blended-momentum sleeve
-    (with breadth regime -> cash) + 50% low-volatility sleeve. The two sleeves
+def combo_mom_lowvol(panel, mshare=0.4, top_n=10, hold_band=18):
+    """CHAMPION 'All-Weather Nifty': 40% blended-momentum sleeve
+    (with breadth regime -> cash) + 60% low-volatility sleeve. The two sleeves
     are weakly correlated: momentum wins in trends, low-vol cushions crashes;
     idle cash earns the liquid-fund rate."""
     wm = mom_blend_bands(panel, top_n=top_n, hold_band=hold_band,
@@ -309,5 +309,5 @@ def combo_mom_lowvol(panel, mshare=0.5, top_n=10, hold_band=22):
 STRATEGIES.update({
     "mom_blend22": ("Momentum Blend Band-22", mom_blend_bands,
                     dict(top_n=10, hold_band=22, trend_gate=False)),
-    "allweather": ("All-Weather 50/50 Mom+LowVol", combo_mom_lowvol, {}),
+    "allweather": ("All-Weather 40/60 Mom+LowVol", combo_mom_lowvol, {}),
 })

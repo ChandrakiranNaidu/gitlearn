@@ -1,0 +1,388 @@
+<title>Paper Trading Desk</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: one 1000px column, the desk of the Nifty Alpha Lab — same terminal
+   tokens as the research dashboard so the two read as one system. */
+:root {
+  --bg: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --good: #0ca30c; --critical: #d03b3b;
+  --up: #0ca30c; --accent: #3987e5; --accent-soft: rgba(57,135,229,0.14);
+  color-scheme: dark;
+  --font-d: "Archivo", system-ui, sans-serif;
+  --font-b: "Inter", system-ui, sans-serif;
+  --font-m: "IBM Plex Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg:#f9f9f7; --surface:#fcfcfb; --surface-2:#f1f0ec; --ink:#0b0b0b;
+    --ink-2:#52514e; --muted:#898781; --grid:#e1e0d9; --baseline:#c3c2b7;
+    --border:rgba(11,11,11,0.10); --s1:#2a78d6; --s2:#eb6834; --good:#0ca30c;
+    --critical:#d03b3b; --up:#006300; --accent:#2a78d6; --accent-soft:rgba(42,120,214,0.10);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg:#f9f9f7; --surface:#fcfcfb; --surface-2:#f1f0ec; --ink:#0b0b0b;
+  --ink-2:#52514e; --muted:#898781; --grid:#e1e0d9; --baseline:#c3c2b7;
+  --border:rgba(11,11,11,0.10); --s1:#2a78d6; --s2:#eb6834; --good:#0ca30c;
+  --critical:#d03b3b; --up:#006300; --accent:#2a78d6; --accent-soft:rgba(42,120,214,0.10);
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-b);
+  font-size: 15px; line-height: 1.55; margin: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 72px; -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 1000px; margin: 0 auto; }
+h1,h2,h3 { font-family: var(--font-d); text-wrap: balance; margin: 0; }
+.num { font-variant-numeric: tabular-nums; font-family: var(--font-m); }
+header { padding: 38px 0 0; }
+.eyebrow { font-family: var(--font-m); font-size: 11.5px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--muted); display: flex; flex-wrap: wrap;
+  gap: 6px 14px; }
+.eyebrow .dot { color: var(--accent); }
+h1 { font-size: clamp(30px, 5vw, 44px); font-weight: 800; letter-spacing: -.02em; margin-top: 8px; }
+.sub { color: var(--ink-2); max-width: 64ch; margin-top: 8px; }
+.card { border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
+  margin-top: 24px; overflow: hidden; }
+.card-pad { padding: 22px 24px; }
+.panel-k { font-family: var(--font-m); font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); display: flex; align-items: center;
+  gap: 12px; flex-wrap: wrap; }
+.chip { font-family: var(--font-m); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--ink-2); white-space: nowrap; }
+.chip.live { color: var(--good); border-color: currentColor; }
+.chip.wait { color: var(--muted); }
+/* setup */
+.setup { background: linear-gradient(180deg, var(--accent-soft), transparent 55%) var(--surface); }
+.setup h2 { font-size: 24px; }
+.setup p { color: var(--ink-2); max-width: 58ch; }
+.field { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.field label { display: block; font-family: var(--font-m); font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 7px; }
+.field input { background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; color: var(--ink); font-family: var(--font-m); font-size: 22px;
+  padding: 11px 14px; width: 230px; max-width: 100%; }
+.field input:focus-visible { outline: 2px solid var(--accent); }
+.btn { all: unset; cursor: pointer; background: var(--accent); color: #fff;
+  font-family: var(--font-d); font-weight: 700; font-size: 15px; padding: 13px 24px;
+  border-radius: 10px; transition: transform .12s ease, opacity .2s; }
+.btn:hover { transform: translateY(-1px); }
+.btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.btn[disabled] { opacity: .5; cursor: default; transform: none; }
+.presets { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.presets button { all: unset; cursor: pointer; font-family: var(--font-m); font-size: 12px;
+  padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border); color: var(--ink-2); }
+.presets button:hover { border-color: var(--accent); color: var(--accent); }
+.note { font-size: 13px; color: var(--muted); margin-top: 16px; max-width: 60ch; }
+.err { color: var(--critical); font-size: 13.5px; margin-top: 12px; }
+/* hero tiles */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr));
+  gap: 1px; background: var(--border); }
+.tile { background: var(--surface); padding: 16px 22px 18px; }
+.tile .k { font-family: var(--font-m); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); }
+.tile .v { font-family: var(--font-m); font-weight: 600; font-size: clamp(20px,2.6vw,28px);
+  margin-top: 6px; }
+.tile .d { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
+.v.up { color: var(--up); } .v.down { color: var(--critical); } .v.accent { color: var(--accent); }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; }
+/* tables */
+.tbl-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 560px; }
+th { font-family: var(--font-m); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); text-align: right; padding: 10px 12px;
+  border-bottom: 1px solid var(--baseline); white-space: nowrap; }
+th:first-child { text-align: left; }
+td { padding: 9px 12px; text-align: right; border-bottom: 1px solid var(--grid);
+  font-size: 13.5px; }
+td:first-child { text-align: left; font-weight: 600; }
+tr:last-child td { border-bottom: 0; }
+.pos { color: var(--up); } .neg { color: var(--critical); }
+.sleeve-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+.log { font-family: var(--font-m); font-size: 12.5px; display: grid; gap: 6px; }
+.log .row { display: flex; gap: 12px; }
+.log .d { color: var(--muted); flex: 0 0 auto; }
+.log .a { color: var(--accent); flex: 0 0 72px; text-transform: uppercase; font-size: 10.5px; padding-top: 2px; }
+.empty { color: var(--muted); font-size: 13.5px; padding: 6px 0; }
+footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--baseline);
+  color: var(--muted); font-size: 12px; font-family: var(--font-m);
+  display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.tip { position: fixed; pointer-events: none; z-index: 50; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; font-size: 12px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.35); opacity: 0; transition: opacity .1s; }
+.tip .t-date { font-family: var(--font-m); color: var(--muted); font-size: 11px; }
+.tip .t-row { display: flex; gap: 10px; margin-top: 3px; white-space: nowrap; }
+.tip .t-row .num { margin-left: auto; font-weight: 600; }
+.tip .sw { width: 9px; height: 9px; border-radius: 2px; margin-top: 2px; }
+@media (prefers-reduced-motion: no-preference) {
+  .reveal { animation: rise .6s cubic-bezier(.2,.7,.2,1) both; }
+  @keyframes rise { from { opacity:.001; transform: translateY(12px);} to { opacity:1; transform:none;} }
+}
+[hidden] { display: none !important; }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow reveal"><span>Nifty Alpha Lab</span><span class="dot">●</span>
+    <span>All-Weather 40/60</span><span class="dot">●</span><span>paper money · live prices</span></div>
+  <h1 class="reveal" style="animation-delay:.05s">Paper Trading Desk</h1>
+  <p class="sub reveal" style="animation-delay:.1s">The champion strategy from the backtest lab, running
+  forward on real end-of-day NSE prices with money that doesn't exist. An engine marks the book after
+  every market close and rebalances on the first session of each month.</p>
+</header>
+
+<!-- ============ setup (shown when no portfolio exists) ============ -->
+<div class="card setup card-pad reveal" id="setupCard" style="animation-delay:.16s" hidden>
+  <h2>Fund your paper account</h2>
+  <p style="margin-top:8px">Choose the starting capital. On the next market close the engine buys the
+  strategy's current book — about 20 positions across the momentum and low-volatility sleeves — and
+  from then on you watch it live here.</p>
+  <div class="field">
+    <div>
+      <label for="capital">Starting capital (₹)</label>
+      <input id="capital" type="number" inputmode="numeric" min="10000" step="10000" value="500000">
+    </div>
+    <button class="btn" id="startBtn">Start paper trading</button>
+  </div>
+  <div class="presets">
+    <button data-v="100000">₹1 lakh</button><button data-v="500000">₹5 lakh</button>
+    <button data-v="1000000">₹10 lakh</button><button data-v="5000000">₹50 lakh</button>
+  </div>
+  <div class="err" id="setupErr" hidden></div>
+  <p class="note">Rules the engine follows: 25 bps cost per trade side · fractional shares allowed ·
+  idle cash earns 5% p.a. · monthly rebalance · momentum sleeve scales to cash when market breadth fades.
+  Paper results only — not investment advice.</p>
+</div>
+
+<!-- ============ waiting for first run ============ -->
+<div class="card card-pad" id="waitCard" hidden>
+  <div class="panel-k">Portfolio funded <span class="chip wait">waiting for first market close</span></div>
+  <p class="sub" style="margin-top:10px">Capital of <b class="num" id="waitCap"></b> is ready. The engine
+  runs on weekday evenings after the NSE close (about 18:10 IST) and will build the opening book on its
+  next run. This page updates by itself — nothing to do.</p>
+</div>
+
+<!-- ============ live dashboard ============ -->
+<div id="desk" hidden>
+  <div class="card">
+    <div class="card-pad" style="padding-bottom:10px">
+      <div class="panel-k">Portfolio <span class="chip live" id="liveChip">live</span>
+        <span style="margin-left:auto" class="num" id="lastMark"></span></div>
+    </div>
+    <div class="tiles" id="tiles"></div>
+    <div class="card-pad">
+      <div class="panel-k" style="margin-bottom:8px">NAV vs equal-weight benchmark · growth of capital</div>
+      <div class="chart" id="navChart"></div>
+      <div class="panel-k" style="margin-top:10px; gap:18px">
+        <span style="display:inline-flex;gap:8px;align-items:center"><i style="width:16px;height:3px;border-radius:2px;background:var(--s1)"></i>strategy</span>
+        <span style="display:inline-flex;gap:8px;align-items:center"><i style="width:16px;height:3px;border-radius:2px;background:var(--s2)"></i>buy &amp; hold EW</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-pad" style="padding-bottom:6px"><div class="panel-k">Positions
+      <span style="margin-left:auto;display:inline-flex;gap:14px">
+        <span style="display:inline-flex;gap:6px;align-items:center;font-size:11px;color:var(--ink-2)"><i class="sleeve-dot" style="background:var(--s2)"></i>momentum</span>
+        <span style="display:inline-flex;gap:6px;align-items:center;font-size:11px;color:var(--ink-2)"><i class="sleeve-dot" style="background:#199e70"></i>low-vol</span>
+      </span></div></div>
+    <div class="tbl-scroll"><table id="posTable"></table></div>
+  </div>
+
+  <div class="card card-pad">
+    <div class="panel-k" style="margin-bottom:10px">Recent trades</div>
+    <div class="tbl-scroll"><table id="tradeTable"></table></div>
+    <div class="empty" id="tradeEmpty" hidden>No trades yet.</div>
+  </div>
+
+  <div class="card card-pad">
+    <div class="panel-k" style="margin-bottom:12px">Engine log</div>
+    <div class="log" id="logList"></div>
+  </div>
+</div>
+
+<div class="card card-pad" id="loading"><div class="panel-k">Connecting to the desk…</div></div>
+<div class="card card-pad" id="offline" hidden>
+  <div class="panel-k">Read-only view</div>
+  <p class="sub" style="margin-top:8px">This desk stores its portfolio in the artifact's shared database,
+  which needs a signed-in viewer. Open the link from the account that owns it.</p>
+</div>
+
+<footer><span>Paper Trading Desk</span><span>engine: backtest-lab/papertrade</span>
+  <span style="margin-left:auto">paper money — not investment advice</span></footer>
+</div>
+<div class="tip" id="tip" aria-hidden="true"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const inr = v => "₹" + Math.round(v).toLocaleString("en-IN");
+const fmtPct = (v,s=2) => (v>0?"+":"") + (v*100).toFixed(s) + "%";
+const tip = $("tip");
+function showTip(html,x,y){ tip.innerHTML=html; tip.style.opacity=1;
+  const r=tip.getBoundingClientRect();
+  tip.style.left=Math.min(Math.max(8,x+14),innerWidth-r.width-8)+"px";
+  tip.style.top=Math.min(Math.max(8,y-r.height-10),innerHeight-r.height-8)+"px"; }
+const hideTip = () => tip.style.opacity=0;
+
+let db=null, cfg=null, state=null, navRows=[], trades=[], logs=[];
+const subs = {};
+
+function show(which){
+  for (const id of ["setupCard","waitCard","desk","loading","offline"])
+    $(id).hidden = id!==which;
+}
+
+async function boot(){
+  const t = setTimeout(()=>{ if ($("loading") && !$("loading").hidden) show("offline"); }, 10000);
+  db = await claude.use("db");
+  if (!db){ clearTimeout(t); show("offline"); return; }
+  subs.cfg = db.doc("config/main").onSnapshot(snap=>{
+    clearTimeout(t);
+    cfg = snap.exists ? snap.data() : null;
+    render();
+    if (cfg && !subs.state) subscribeDesk();
+  }, ()=>{ clearTimeout(t); show("offline"); });
+}
+
+function subscribeDesk(){
+  subs.state = db.doc("state/current").onSnapshot(s=>{ state = s.exists ? s.data() : null; render(); });
+  subs.nav = db.collection("nav").orderBy("date").limit(1000)
+    .onSnapshot(q=>{ navRows = q.docs.map(d=>d.data()); render(); });
+  subs.trades = db.collection("trades").orderBy("date","desc").limit(40)
+    .onSnapshot(q=>{ trades = q.docs.map(d=>d.data()); render(); });
+  subs.log = db.collection("log").orderBy("date","desc").limit(14)
+    .onSnapshot(q=>{ logs = q.docs.map(d=>d.data()); render(); });
+}
+
+/* ---------- setup actions ---------- */
+document.querySelectorAll(".presets button").forEach(b=>
+  b.addEventListener("click", ()=> $("capital").value = b.dataset.v));
+$("startBtn").addEventListener("click", async ()=>{
+  const cap = Number($("capital").value);
+  const err = $("setupErr");
+  if (!(cap >= 10000)) { err.textContent = "Enter at least ₹10,000."; err.hidden = false; return; }
+  err.hidden = true; $("startBtn").disabled = true; $("startBtn").textContent = "Funding…";
+  try {
+    await db.doc("config/main").set({
+      capital: cap, started: true,
+      start_date: new Date().toISOString().slice(0,10),
+      strategy: "allweather_40_60"
+    });
+  } catch(e) {
+    err.textContent = "Could not save — " + (e.code==="not_granted" ? "you don't have write access to this desk." : "try again.");
+    err.hidden = false;
+  }
+  $("startBtn").disabled = false; $("startBtn").textContent = "Start paper trading";
+});
+
+/* ---------- render ---------- */
+function render(){
+  if (!db) return;
+  if (!cfg){ show("setupCard"); return; }
+  if (!state){ show("waitCard"); $("waitCap").textContent = inr(cfg.capital); return; }
+  show("desk");
+  const cap = Number(cfg.capital), nav = Number(state.nav);
+  const pnl = nav - cap, ret = nav/cap - 1;
+  const bench = Number(state.bench_nav || cap), bret = bench/cap - 1;
+  $("lastMark").textContent = "marked " + state.last_mark;
+  $("tiles").innerHTML = [
+    ["Net asset value", inr(nav), "started with "+inr(cap), ""],
+    ["P&L", (pnl>=0?"+":"−")+inr(Math.abs(pnl)).slice(1), fmtPct(ret)+" since start", pnl>=0?"up":"down"],
+    ["vs benchmark", fmtPct(ret-bret), "EW index: "+fmtPct(bret), (ret-bret)>=0?"up":"down"],
+    ["Invested", Math.round((state.invested||0)*100)+"%", "breadth "+Math.round((state.breadth||0)*100)+"%", "accent"],
+    ["Cash", inr(state.cash||0), "earning 5% p.a.", ""],
+  ].map(t=>`<div class="tile"><div class="k">${t[0]}</div><div class="v num ${t[3]}">${t[1]}</div><div class="d">${t[2]}</div></div>`).join("");
+  navChart();
+  posTable();
+  tradeTable();
+  $("logList").innerHTML = logs.length ? logs.map(l=>
+    `<div class="row"><span class="d">${l.date}</span><span class="a">${l.action||""}</span><span>${l.msg||""}</span></div>`).join("")
+    : '<div class="empty">The engine has not reported yet.</div>';
+}
+
+function posTable(){
+  const px = state.last_prices || {};
+  const mom = new Set(state.mom_held || []), lv = new Set(state.lv_held || []);
+  const rows = Object.entries(state.positions||{}).map(([sym,p])=>{
+    const last = px[sym] ?? p.avg_price, val = p.shares*last;
+    const pl = (last/p.avg_price - 1);
+    return {sym, p, last, val, pl};
+  }).sort((a,b)=>b.val-a.val);
+  $("posTable").innerHTML = `<tr><th>Stock</th><th>Sleeve</th><th>Shares</th><th>Avg price</th><th>Last</th><th>Value</th><th>P&L</th></tr>` +
+    rows.map(r=>{
+      const dots = (mom.has(r.sym)?'<i class="sleeve-dot" style="background:var(--s2)"></i>':"") +
+                   (lv.has(r.sym)?'<i class="sleeve-dot" style="background:#199e70"></i>':"");
+      return `<tr><td>${r.sym}</td>
+        <td style="text-align:right">${dots || '<span style="color:var(--muted)">—</span>'}</td>
+        <td class="num">${r.p.shares}</td><td class="num">${r.p.avg_price.toLocaleString("en-IN")}</td>
+        <td class="num">${r.last.toLocaleString("en-IN")}</td><td class="num">${inr(r.val)}</td>
+        <td class="num ${r.pl>=0?"pos":"neg"}">${fmtPct(r.pl,1)}</td></tr>`;
+    }).join("");
+}
+
+function tradeTable(){
+  $("tradeEmpty").hidden = trades.length > 0;
+  $("tradeTable").innerHTML = !trades.length ? "" :
+    `<tr><th>Date</th><th>Stock</th><th>Side</th><th>Shares</th><th>Price</th><th>Value</th><th>Cost</th></tr>` +
+    trades.map(t=>`<tr><td class="num" style="font-weight:400;color:var(--ink-2)">${t.date}</td><td style="text-align:left">${t.sym}</td>
+      <td class="num ${t.side==="BUY"?"pos":"neg"}">${t.side}</td><td class="num">${t.shares}</td>
+      <td class="num">${Number(t.price).toLocaleString("en-IN")}</td><td class="num">${inr(t.value)}</td>
+      <td class="num" style="color:var(--muted)">${inr(t.cost)}</td></tr>`).join("");
+}
+
+function navChart(){
+  const el = $("navChart"); el.innerHTML = "";
+  const cap = Number(cfg.capital);
+  let rows = navRows;
+  if (!rows.length && state) rows = [{date: state.last_mark, nav: state.nav, bench_nav: state.bench_nav||cap}];
+  const w = Math.max(el.clientWidth||700, 320), h = 240;
+  const padL=58,padR=16,padT=12,padB=24;
+  const xs = rows.map(r=>new Date(r.date).getTime());
+  const t0 = Math.min(...xs) - 864e5, t1 = Math.max(...xs) + 864e5;
+  const vals = rows.flatMap(r=>[Number(r.nav), Number(r.bench_nav||cap)]).concat([cap]);
+  const v0 = Math.min(...vals)*0.995, v1 = Math.max(...vals)*1.005;
+  const X=t=>padL+(t-t0)/(t1-t0)*(w-padL-padR), Y=v=>padT+(v1-v)/(v1-v0)*(h-padT-padB);
+  const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  svg.setAttribute("viewBox",`0 0 ${w} ${h}`);
+  const g=(tag,at)=>{const n=document.createElementNS(svg.namespaceURI,tag);for(const k in at)n.setAttribute(k,at[k]);svg.appendChild(n);return n;};
+  const span=v1-v0, step=Math.pow(10,Math.floor(Math.log10(span/4)));
+  const st=(span/4/step>=5?5:span/4/step>=2?2:1)*step;
+  for(let v=Math.ceil(v0/st)*st; v<=v1; v+=st){
+    g("line",{x1:padL,x2:w-padR,y1:Y(v),y2:Y(v),stroke:css("--grid")});
+    const tx=g("text",{x:padL-8,y:Y(v)+3.5,"text-anchor":"end",fill:css("--muted"),"font-size":10,"font-family":css("--font-m")});
+    tx.textContent = v>=1e5 ? (v/1e5).toFixed(1)+"L" : Math.round(v/1000)+"k";
+  }
+  g("line",{x1:padL,x2:w-padR,y1:Y(cap),y2:Y(cap),stroke:css("--baseline"),"stroke-dasharray":"4 3"});
+  const series=[["bench_nav",css("--s2"),1.6],["nav",css("--s1"),2.4]];
+  for(const [key,color,sw] of series){
+    const d=rows.map((r,i)=>(i?"L":"M")+X(new Date(r.date).getTime()).toFixed(1)+" "+Y(Number(r[key]||cap)).toFixed(1)).join("");
+    g("path",{d,fill:"none",stroke:color,"stroke-width":sw,"stroke-linejoin":"round","stroke-linecap":"round"});
+    const lastR=rows[rows.length-1];
+    g("circle",{cx:X(new Date(lastR.date).getTime()),cy:Y(Number(lastR[key]||cap)),r:3.5,fill:color,stroke:css("--surface"),"stroke-width":2});
+  }
+  const hit=g("rect",{x:padL,y:padT,width:w-padL-padR,height:h-padT-padB,fill:"transparent"});
+  hit.addEventListener("mousemove",ev=>{
+    const box=svg.getBoundingClientRect(); const fx=(ev.clientX-box.left)*(w/box.width);
+    let best=rows[0],bd=1e18;
+    for(const r of rows){const d=Math.abs(X(new Date(r.date).getTime())-fx); if(d<bd){bd=d;best=r;}}
+    showTip(`<div class="t-date">${best.date}</div>
+      <div class="t-row"><span class="sw" style="background:${css("--s1")}"></span>strategy<span class="num">${inr(best.nav)}</span></div>
+      <div class="t-row"><span class="sw" style="background:${css("--s2")}"></span>benchmark<span class="num">${inr(best.bench_nav||cap)}</span></div>`,
+      ev.clientX,ev.clientY);
+  });
+  hit.addEventListener("mouseleave",hideTip);
+  el.appendChild(svg);
+}
+
+let rAF; addEventListener("resize",()=>{cancelAnimationFrame(rAF);rAF=requestAnimationFrame(()=>{if(cfg&&state)render();});});
+boot();
+</script>

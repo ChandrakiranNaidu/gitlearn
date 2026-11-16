@@ -49,8 +49,10 @@ def evaluate(key, name, fn, kwargs, panel):
 
 
 def main():
-    panel = load_panel()
+    pit = "--pit" in sys.argv
+    panel = load_panel(point_in_time=pit)
     out = {"strategies": [], "meta": {
+        "point_in_time": pit,
         "universe": list(panel["close"].columns),
         "start": str(panel["close"].index[0].date()),
         "end": str(panel["close"].index[-1].date()),
@@ -59,13 +61,13 @@ def main():
         "is_window": f"{WARMUP_END}..{IS_END}",
         "oos_window": f"{OOS_START}..{panel['close'].index[-1].date()}",
     }}
-    only = sys.argv[1:] or None
+    only = [a for a in sys.argv[1:] if not a.startswith("--")] or None
     for key, (name, fn, kwargs) in STRATEGIES.items():
         if only and key not in only:
             continue
         print(f"running {key}...", flush=True)
         out["strategies"].append(evaluate(key, name, fn, kwargs, panel))
-    with open("results.json", "w") as f:
+    with open("results_pit.json" if pit else "results.json", "w") as f:
         json.dump(out, f)
     # console summary
     hdr = f"{'strategy':28} {'CAGR':>7} {'Shrp':>5} {'MaxDD':>7} | {'IS CAGR':>8} {'OOS CAGR':>8} {'OOS Shrp':>8} {'+yrs':>5}"

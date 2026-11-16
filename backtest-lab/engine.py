@@ -23,9 +23,34 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 COST_PER_SIDE = 0.0025  # 25 bps per side: brokerage+STT+stamp+impact
 
 
-def load_panel(data_dir=DATA_DIR):
+MEMBERSHIP_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "membership_weights.csv")
+# dataset ticker -> local csv basename (local files replace & - with _)
+_NAME_MAP = {"BAJAJAUTO": "BAJAJ.AUTO", "M&M": "M_M", "MCDOWELL-N": "MCDOWELL_N",
+             "VSNL": "TATACOMM"}  # VSNL renamed Tata Communications (2008)
+
+
+def load_membership(index, columns, csv_path=MEMBERSHIP_CSV):
+    """Boolean DataFrame (dates x symbols): True while the stock was a Nifty 50
+    member. Built from monthly point-in-time weights (figshare/Bera dataset,
+    sourced from official NSE announcements). Snapshots are forward-filled;
+    dates before the first snapshot (Jan 2008) use that first snapshot, dates
+    after the last one keep the last known membership."""
+    wdf = pd.read_csv(csv_path, parse_dates=["DATE"]).set_index("DATE")
+    wdf.columns = [_NAME_MAP.get(c, c) for c in wdf.columns]
+    member = (wdf > 0)
+    member = member.T.groupby(level=0).max().T  # OR renamed duplicates
+    member = member.reindex(index, method="ffill")
+    member = member.bfill()  # pre-2008 bars take the Jan-2008 membership
+    member = member.reindex(columns=columns, fill_value=False)
+    return member.fillna(False)
+
+
+def load_panel(data_dir=DATA_DIR, point_in_time=False):
     """Return dict of DataFrames: open/high/low/close/volume, indexed by date,
-    columns = symbols, aligned on the union trading calendar."""
+    columns = symbols, aligned on the union trading calendar. With
+    point_in_time=True, adds a boolean 'member' frame from the historical
+    Nifty 50 membership file."""
     frames = {}
     for f in sorted(os.listdir(data_dir)):
         if not f.endswith(".csv"):
@@ -45,14 +70,20 @@ def load_panel(data_dir=DATA_DIR):
     # never backfill: a stock has NaN before its listing date.
     panel["close"] = panel["close"].ffill(limit=5)
     panel["open"] = panel["open"].fillna(panel["close"])
+    if point_in_time:
+        panel["member"] = load_membership(idx, panel["close"].columns)
     return panel
 
 
-def tradable_mask(close, min_history=252):
-    """True where a stock has at least `min_history` prior observations."""
+def tradable_mask(close, min_history=252, member=None):
+    """True where a stock has at least `min_history` prior observations and,
+    when a membership frame is given, is a current index member."""
     has_data = close.notna()
     count = has_data.cumsum()
-    return has_data & (count >= min_history)
+    ok = has_data & (count >= min_history)
+    if member is not None:
+        ok = ok & member
+    return ok
 
 
 CASH_RATE = 0.05  # annualized yield on idle cash (liquid fund, conservative)
@@ -133,7 +164,16 @@ def metrics(returns, equity, periods=252, label=""):
     }
 
 
+REBAL_OFFSET = 0  # trading-day shift applied to every rebalance date
+
+
 def month_ends(index):
-    """Last trading day of each month in the index."""
+    """Last trading day of each month in the index, shifted by REBAL_OFFSET
+    trading days (for rebalance-timing robustness tests)."""
     s = pd.Series(index, index=index)
-    return s.groupby([index.year, index.month]).last().values
+    ends = s.groupby([index.year, index.month]).last().values
+    if REBAL_OFFSET:
+        pos = index.get_indexer(pd.DatetimeIndex(ends))
+        pos = np.clip(pos + REBAL_OFFSET, 0, len(index) - 1)
+        ends = index[np.unique(pos)].values
+    return ends

@@ -228,27 +228,29 @@ footer { margin-top: 70px; padding-top: 18px; border-top: 1px solid var(--baseli
 <header>
   <div class="eyebrow reveal">
     <span>NSE · Nifty 50</span><span class="dot">●</span>
-    <span>49 stocks</span><span class="dot">●</span>
+    <span>88 stocks incl. fallen angels</span><span class="dot">●</span>
     <span>2007 – 2026</span><span class="dot">●</span>
-    <span>4,921 sessions</span><span class="dot">●</span>
+    <span>point-in-time membership</span><span class="dot">●</span>
     <span>16 algorithms tested</span>
   </div>
   <h1 class="reveal" style="animation-delay:.06s">Nifty Alpha Lab</h1>
   <p class="sub reveal" style="animation-delay:.12s">A systematic hunt for a trading algorithm that makes
-  <strong>consistent profits</strong> on Nifty 50 stocks: 19 years of adjusted daily data, real NSE trading
-  costs, and an honest in-sample / out-of-sample split. Nine strategy families went in. One came out on top.</p>
+  <strong>consistent profits</strong> on Nifty 50 stocks — now survivorship-bias-free. The universe is the
+  <strong>actual index membership of each month</strong> (Suzlon, Unitech, RCom, Yes Bank and the other
+  casualties included), with real NSE costs and an untouched out-of-sample window. Nine strategy families
+  went in. A two-sleeve blend came out on top — and passed every robustness test thrown at it.</p>
 
   <div class="verdict reveal" style="animation-delay:.2s">
     <div class="verdict-head">
       <span class="chip champion">Champion</span>
-      <h2>Momentum Blend · Band-22</h2>
+      <h2>All-Weather 40/60 · Momentum + Low-Vol</h2>
       <span class="chip">monthly rebalance</span>
-      <span class="chip">long-only · top 10</span>
+      <span class="chip">long-only · ~20 names</span>
     </div>
     <div class="tiles" id="heroTiles"></div>
     <div class="hero-chart"><div class="chart" id="heroChart"></div></div>
     <div class="chart-foot">
-      <span class="legend"><i class="swatch" style="background:var(--s1)"></i>Momentum Blend Band-22</span>
+      <span class="legend"><i class="swatch" style="background:var(--s1)"></i>All-Weather 40/60</span>
       <span class="legend"><i class="swatch" style="background:var(--s2)"></i>Buy &amp; hold, equal weight</span>
       <span id="heroGrow" class="mono" style="margin-left:auto"></span>
     </div>
@@ -290,31 +292,69 @@ footer { margin-top: 70px; padding-top: 18px; border-top: 1px solid var(--baseli
   </div>
 </section>
 
+<section id="bias">
+  <div class="sec-head"><span class="idx">02</span><h2>The survivorship illusion</h2><span class="note">same engine, two universes</span></div>
+  <p class="sec-sub">The first version of this lab used <i>today's</i> Nifty 50 members for all 19 years — the
+  classic backtest sin. Rebuilding the universe from the actual month-by-month index membership (including the
+  stocks that later collapsed out of it) erased about <strong>7 percentage points of phantom CAGR</strong> from
+  every strategy, buy &amp; hold included. Hollow bars are the biased numbers; solid bars are the truth.
+  Momentum was hit hardest: in the real universe it rode Suzlon, Unitech and RCom up — and part of the way down.</p>
+  <div class="chart" id="biasChart" style="margin-top:24px"></div>
+  <div class="chart-foot" style="padding:8px 2px 0">
+    <span class="legend"><i class="swatch" style="background:var(--grid);border:1px solid var(--muted)"></i>Survivor-only universe (biased)</span>
+    <span class="legend"><i class="swatch" style="background:var(--s1)"></i>Point-in-time universe (honest)</span>
+  </div>
+</section>
+
 <section id="years">
-  <div class="sec-head"><span class="idx">02</span><h2>Year by year</h2><span class="note">net annual return</span></div>
+  <div class="sec-head"><span class="idx">03</span><h2>Year by year</h2><span class="note">net annual return</span></div>
   <p class="sec-sub">Consistency is the whole game: a strategy you can hold is one that rarely hands you a losing
   year and never a lost decade. Blue is a profitable year, red a losing one.</p>
   <div class="heat-scroll"><table class="heat" id="heat"></table></div>
 </section>
 
+<section id="robust">
+  <div class="sec-head"><span class="idx">04</span><h2>Robustness — is the edge real?</h2><span class="note">three independent tests</span></div>
+  <p class="sec-sub">A genuine edge is a plateau, not a peak: nudge any parameter and the result should barely
+  move. The champion passed all three tests.</p>
+  <div class="detail-grid" style="border:1px solid var(--border);border-radius:14px;background:var(--surface);margin-top:24px;overflow:hidden">
+    <div>
+      <div class="panel-k">1 · Parameter plateau — Sharpe under perturbation</div>
+      <div class="chart" id="robPlateau" style="margin-top:8px"></div>
+      <div class="panel-k" style="margin-top:18px">3 · Rebalance-day shift — CAGR by trade day</div>
+      <div class="chart" id="robShift" style="margin-top:8px"></div>
+    </div>
+    <div>
+      <div class="panel-k">2 · Block bootstrap · 2,000 resamples</div>
+      <div class="mrows" id="robBoot"></div>
+      <p style="color:var(--ink-2);font-size:13px;margin:14px 0 0">Daily returns were resampled in 21-day
+      blocks 2,000 times to ask: how much of this result is luck? The answer: the return is uncertain, the
+      <i>profitability</i> is not — every single resample ended positive.</p>
+    </div>
+  </div>
+</section>
+
 <section id="winner">
-  <div class="sec-head"><span class="idx">03</span><h2>Inside the champion</h2><span class="note">mechanics</span></div>
-  <p class="sec-sub">Momentum Blend Band-22 is cross-sectional momentum with three refinements that earn their
-  keep: a blended signal, a lazy exit, and a breadth-driven brake. On every month's last session it does four things:</p>
+  <div class="sec-head"><span class="idx">05</span><h2>Inside the champion</h2><span class="note">mechanics</span></div>
+  <p class="sec-sub">All-Weather 40/60 runs two sleeves that win in different weather, rebalanced on every
+  month's last session. The momentum sleeve hunts; the low-volatility sleeve holds the fort.</p>
   <div class="anatomy">
-    <div class="step"><div class="n">STEP 1 / RANK</div><h3>Blend three horizons</h3>
-      <p>Every stock is ranked by its 3-month, 6-month and 12-month return — each skipping the most
-      recent month to dodge short-term reversal — and the three percentile ranks are averaged into one score.</p></div>
-    <div class="step"><div class="n">STEP 2 / GATE</div><h3>Demand absolute momentum</h3>
-      <p>A stock qualifies only if its 12-1 month return is positive. Relative winners in a falling
-      market don't make the cut; their slots sit in cash instead.</p></div>
-    <div class="step"><div class="n">STEP 3 / HOLD</div><h3>Buy 10, sell at rank 22</h3>
-      <p>The top 10 scores are held at 10% each — but an existing holding is kept until it decays past
-      rank 22. The band cuts turnover roughly in half, and turnover is where backtests go to die.</p></div>
-    <div class="step"><div class="n">STEP 4 / BRAKE</div><h3>Scale out with breadth</h3>
-      <p>When fewer stocks trade above their own 200-day average, the whole book scales toward cash
-      (fully invested above 50% breadth, flat below 20%). Cash earns the liquid-fund rate. This is
-      what turned 2008 from −27% into +2%.</p></div>
+    <div class="step"><div class="n">SLEEVE A / 40% · MOMENTUM</div><h3>Buy the leaders</h3>
+      <p>Rank every current index member by its 3-, 6- and 12-month return (each skipping the latest month),
+      average the percentile ranks, demand a positive 12-month trend, and hold the top 10 — keeping each
+      until it decays past rank 18 to keep turnover cheap.</p></div>
+    <div class="step"><div class="n">SLEEVE A / BRAKE</div><h3>Breadth scales to cash</h3>
+      <p>When fewer members trade above their own 200-day average, the momentum sleeve scales toward cash
+      (full above 50% breadth, flat below 20%), and idle cash earns the liquid-fund rate. In 2008 this
+      sleeve went to cash while the index halved.</p></div>
+    <div class="step"><div class="n">SLEEVE B / 60% · LOW-VOL</div><h3>Own the calm ones</h3>
+      <p>The 10 least-volatile members of the past year, equal-weighted. Boring by design — this is the
+      betting-against-volatility anomaly, and in India it has been quietly excellent: 16 of 19 years
+      positive on its own.</p></div>
+    <div class="step"><div class="n">WHY IT WORKS</div><h3>Uncorrelated sleeves</h3>
+      <p>Momentum wins trends and crashes in reversals; low-vol lags rallies and cushions crashes. Blended
+      40/60, the worst drawdown drops to −24.5% against the index's −45.4%, and no 3-year holding period
+      in 19 years lost money (worst: +5%).</p></div>
   </div>
   <div class="holdings">
     <div class="panel-k">What it holds right now <span class="mono" id="holdAsof" style="margin-left:auto"></span></div>
@@ -323,22 +363,28 @@ footer { margin-top: 70px; padding-top: 18px; border-top: 1px solid var(--baseli
 </section>
 
 <section id="method">
-  <div class="sec-head"><span class="idx">04</span><h2>Methodology &amp; honesty</h2><span class="note">read before believing</span></div>
+  <div class="sec-head"><span class="idx">06</span><h2>Methodology &amp; honesty</h2><span class="note">read before believing</span></div>
   <div class="method">
+    <div class="m-card"><h3><span class="ic">◆</span>Point-in-time universe</h3><p>Each month a stock is only
+      selectable if it was actually in the Nifty 50 that month, using official NSE membership history
+      (Bera, figshare 2025). 88 of 100 historical members have full price data.</p></div>
     <div class="m-card"><h3><span class="ic">◆</span>No look-ahead</h3><p>Signals use only each day's close;
       execution happens on the next bar. Stocks become eligible only after 252 bars of listed history.</p></div>
     <div class="m-card"><h3><span class="ic">◆</span>Real NSE costs</h3><p>25 basis points per side — brokerage,
       STT, stamp duty and impact — charged on all turnover. Idle cash earns 5% p.a. in a liquid fund.</p></div>
-    <div class="m-card"><h3><span class="ic">◆</span>IS / OOS discipline</h3><p>All parameter choices (horizons,
-      band width, breadth thresholds) were ranked on 2008–2017 in-sample data only. 2018–2026 was touched
-      once, as validation.</p></div>
-    <div class="m-card"><h3><span class="ic">◆</span>Total-return data</h3><p>Prices are split- and
-      dividend-adjusted daily series for 49 current constituents, 2007–2026, sourced from Twelve Data (NSE).</p></div>
+    <div class="m-card"><h3><span class="ic">◆</span>IS / OOS discipline</h3><p>All parameter choices (sleeve mix,
+      band width, horizons) were ranked on 2008–2017 in-sample data only. 2018–2026 was touched once, as
+      validation — and the robustness suite perturbed everything afterwards.</p></div>
+    <div class="m-card"><h3><span class="ic">◆</span>Total-return data</h3><p>Split- and dividend-adjusted
+      daily series for 88 stocks, 2007–2026, from Twelve Data and Yahoo Finance (NSE).</p></div>
+    <div class="m-card"><h3><span class="ic">◆</span>Taxes not modelled</h3><p>Returns are pre-tax. At ~150–300%
+      turnover most gains would be short-term; apply your slab before believing the compounding.</p></div>
   </div>
-  <div class="caveat"><b>Survivorship bias, declared:</b> the universe is <i>today's</i> Nifty 50. Companies
-  that fell out of the index along the way are missing, which flatters absolute returns for the strategies
-  <b>and</b> the buy-and-hold benchmark alike — relative comparisons are the fair read. Past performance is
-  not a promise; this is research, not investment advice.</div>
+  <div class="caveat"><b>Remaining gaps, declared:</b> 12 delisted ex-members (Satyam, Ranbaxy, HDFC Ltd,
+  JP Associates, Reliance Capital, Cairn and others) have no recoverable price data — their index tenure is
+  excluded, a residual bias that cuts both ways since the list mixes disasters and winners. Membership data
+  ends Aug 2025; later months use the last known membership. Past performance is not a promise; this is
+  research, not investment advice.</div>
 </section>
 
 <footer>
@@ -367,11 +413,11 @@ const inr = v => { // growth of 1 lakh
 };
 
 const VERDICT = {
-  mom_blend22: ["champion","Champion"], allweather: ["runner","Runner-up"], buy_hold: ["bench","Benchmark"],
-  sma_50_200: ["pass","Profitable"], mom_12_1_top10: ["pass","Profitable"], mom_6_1_top10: ["pass","Profitable"],
-  mom_12_1_top5: ["pass","Profitable"], mom_12_1_iv: ["pass","Profitable"], high52: ["fail","Rejected"],
-  rsi2_dip: ["fail","Rejected"], donchian: ["pass","Profitable"], mom_blend: ["pass","Profitable"],
-  low_vol: ["pass","Profitable"], mom_lowvol: ["pass","Profitable"], mom_blend_vt: ["pass","Profitable"],
+  allweather: ["champion","Champion"], low_vol: ["runner","Runner-up"], buy_hold: ["bench","Benchmark"],
+  sma_50_200: ["pass","Profitable"], mom_12_1_top10: ["pass","Profitable"], mom_6_1_top10: ["fail","Rejected"],
+  mom_12_1_top5: ["fail","Rejected"], mom_12_1_iv: ["pass","Profitable"], high52: ["fail","Rejected"],
+  rsi2_dip: ["fail","Rejected"], donchian: ["fail","Rejected"], mom_blend: ["pass","Profitable"],
+  mom_blend22: ["pass","Profitable"], mom_lowvol: ["pass","Profitable"], mom_blend_vt: ["pass","Profitable"],
   mom_lowvol_vt: ["pass","Profitable"],
 };
 const FAMILY = {
@@ -381,8 +427,8 @@ const FAMILY = {
   mom_blend_vt:"Overlay", mom_lowvol_vt:"Overlay", mom_blend22:"Momentum", allweather:"Blend",
 };
 const DESC = {
-  buy_hold: {sig:"Own every tradable stock in the universe, equal-weighted, rebalanced on the last session of each month.",
-    port:"~49 positions, fully invested at all times.", why:"The bar every active idea must clear. Its −43% drawdown in 2008 is the pain an investor must sit through to earn it."},
+  buy_hold: {sig:"Own every current index member, equal-weighted, rebalanced on the last session of each month.",
+    port:"~43–50 positions, fully invested at all times.", why:"The bar every active idea must clear. In the honest universe it made 14.2% a year — but with a −45% drawdown and a worst 3-year stretch of −25%. Returns you only earn if you can sit through that."},
   sma_50_200: {sig:"For each stock: hold while its 50-day average sits above its 200-day average (a golden cross); step aside into cash when it doesn't.",
     port:"Equal slot per stock in the universe; empty slots stay in cash at 5%.", why:"Classic trend filter. It kept drawdowns shallow (−26%) but gave up too much upside after whipsaw years — profitable, never threatening."},
   mom_12_1_top10: {sig:"Rank all stocks by their 12-month return skipping the last month; buy the 10 strongest with positive momentum.",
@@ -390,7 +436,7 @@ const DESC = {
   mom_6_1_top10: {sig:"Same construction with a 6-month lookback (1-month skip).",
     port:"10 × 10%, monthly rebalance, breadth brake.", why:"Faster signal, more noise, more turnover. Clearly worse out-of-sample than 12-1 — rejected in favor of blending."},
   mom_12_1_top5: {sig:"12-1 momentum concentrated into only the top 5 names.",
-    port:"5 × 20%, monthly.", why:"Highest in-sample CAGR of the simple variants (32%), but concentration doubles single-stock risk and it degraded badly out-of-sample. A classic overfit shape."},
+    port:"5 × 20%, monthly.", why:"The sharpest overfit lesson in the lab: a seductive 18.8% in-sample collapsed to 4.3% out-of-sample once the real universe included the stocks that blew up. Concentrated momentum concentrates the disasters too. Rejected."},
   mom_12_1_iv: {sig:"12-1 momentum top 10, weighted by inverse 3-month volatility instead of equally.",
     port:"10 names, risk-tilted weights, monthly.", why:"Slightly smoother than equal weight but not enough to pay for itself. Kept as a control."},
   high52: {sig:"Buy the 10 stocks trading closest to their own 52-week high.",
@@ -401,8 +447,8 @@ const DESC = {
     port:"Up to 10 breakout positions, daily signals.", why:"Honest but mediocre — breakouts in large caps are too well-watched. Profitable, far behind momentum."},
   mom_blend: {sig:"Average the percentile ranks of 3-, 6- and 12-month returns (each skipping a month); top 10 with a rank-18 holding band and breadth brake.",
     port:"10 × 10%, monthly, band exits.", why:"The prototype of the champion — blending horizons stabilised the signal, the band halved turnover."},
-  low_vol: {sig:"Own the 10 least volatile stocks of the past year, equal-weighted.",
-    port:"10 × 10%, monthly.", why:"The betting-against-volatility anomaly is real in India: 16 of 19 years positive with a −27% worst drawdown. Quietly excellent, and nearly uncorrelated with momentum."},
+  low_vol: {sig:"Own the 10 least volatile index members of the past year, equal-weighted.",
+    port:"10 × 10%, monthly.", why:"The runner-up, and the only simple strategy that survived the honest universe almost untouched: 14.2% CAGR — level with buy &amp; hold — at far lower risk, 16 of 19 years positive, every 3-year window positive. Boring stocks, excellent compounding. It supplies 60% of the champion."},
   mom_lowvol: {sig:"One combined score: 60% momentum rank + 40% low-volatility rank, top 10 with a holding band.",
     port:"10 × 10%, monthly.", why:"Blending in the signal proved weaker than blending in the portfolio (see All-Weather). Kept as a control."},
   mom_blend_vt: {sig:"The momentum blend, with the whole book scaled so trailing realized volatility targets 15% a year.",
@@ -410,9 +456,9 @@ const DESC = {
   mom_lowvol_vt: {sig:"The 60/40 momentum × low-vol score under the same 15% volatility target.",
     port:"0–100% invested, scales daily.", why:"Double defense muted returns without buying extra safety. Rejected in favor of simpler constructions."},
   mom_blend22: {sig:"Blend 3/6/12-month percentile ranks (1-month skip) → require positive 12-1 momentum → buy top 10 → hold to rank 22 → scale with market breadth.",
-    port:"10 × 10% + cash sleeve at 5% p.a., monthly rebalance, ~150% annual turnover.", why:"The widest holding band tested was the single biggest improvement: it keeps winners through noise and starves the cost drag. Chosen on in-sample Sharpe; validated out-of-sample at 0.96 with every rolling 3-year window positive."},
-  allweather: {sig:"Two sleeves, rebalanced monthly: 50% in the momentum blend (band-22, breadth brake) and 50% in the 10 lowest-volatility stocks.",
-    port:"Up to 20 names; sleeves overlap rarely.", why:"Momentum wins trends, low-vol cushions crashes; the mix has the highest Sharpe of everything tested (1.30) and an out-of-sample Sharpe of 1.00. The champion beats it on raw CAGR; this is the one to hold if smoothness matters most."},
+    port:"10 × 10% + cash sleeve at 5% p.a., monthly rebalance.", why:"The former champion of the survivor-only backtest — and the loudest lesson of the rebuild. With the fallen angels back in the universe its CAGR dropped from 21.9% to 11.3%: pure momentum loved stocks like Suzlon and RCom right up to the cliff edge. Still profitable, no longer special alone — but exactly half of what makes the champion work."},
+  allweather: {sig:"Two sleeves, rebalanced monthly: 40% blended-horizon momentum (rank-18 holding band, breadth brake to cash) and 60% in the 10 lowest-volatility members.",
+    port:"Up to 20 names + cash sleeve; ~280% annual turnover.", why:"The honest champion. Best Sharpe of everything tested (0.97 vs the index's 0.76) at barely half the drawdown, 15 of 19 years positive, and no losing 3-year window in 19 years. Chosen on in-sample Sharpe, validated out-of-sample at 0.80, and flat across every parameter perturbation — a plateau, not a lucky peak."},
 };
 
 /* ---------------- tooltip ---------------- */
@@ -777,17 +823,145 @@ function heat() {
 }
 
 /* ---------------- holdings ---------------- */
+const SLEEVE_LAB = {both:"both sleeves", momentum:"momentum", lowvol:"low-vol"};
 function holdings() {
   document.getElementById("holdAsof").textContent = "as of " + META.holdings_asof;
   document.getElementById("holdChips").innerHTML =
-    Object.entries(META.holdings).map(([s,w])=>
-      `<span class="chip">${s}<b>${Math.round(w*1000)/10}%</b></span>`).join("") +
+    Object.entries(META.holdings).map(([s,w])=>{
+      const sl = (META.holdings_sleeve||{})[s];
+      const col = sl==="both" ? "var(--accent)" : sl==="momentum" ? "var(--s2)" : "var(--s3)";
+      return `<span class="chip" title="${SLEEVE_LAB[sl]||""}"><i class="swatch" style="background:${col};width:7px;height:7px;border-radius:50%;margin-right:7px"></i>${s}<b>${Math.round(w*1000)/10}%</b></span>`;
+    }).join("") +
     (META.invested_fraction < 0.999
-      ? `<span class="chip">CASH<b>${Math.round((1-META.invested_fraction)*100)}%</b></span>` : "");
+      ? `<span class="chip">CASH<b>${Math.round((1-META.invested_fraction)*100)}%</b></span>` : "") +
+    `<span style="flex-basis:100%;height:0"></span>
+     <span class="legend" style="font-size:12px;color:var(--ink-2)"><i class="swatch" style="background:var(--s2);width:7px;height:7px;border-radius:50%"></i>momentum sleeve · 4% each</span>
+     <span class="legend" style="font-size:12px;color:var(--ink-2)"><i class="swatch" style="background:var(--s3);width:7px;height:7px;border-radius:50%"></i>low-vol sleeve · 6% each</span>
+     <span class="legend" style="font-size:12px;color:var(--ink-2)"><i class="swatch" style="background:var(--accent);width:7px;height:7px;border-radius:50%"></i>in both · 10%</span>`;
 }
 
-renderBoard(); renderDetail(); heat(); holdings();
+/* ---------------- survivorship comparison ---------------- */
+function biasChart() {
+  const el = document.getElementById("biasChart");
+  el.innerHTML = "";
+  const rows = DATA.strategies.filter(s=>s.biased)
+    .sort((a,b)=>b.biased.cagr-a.biased.cagr);
+  const w = Math.max(el.clientWidth || 800, 320), rowH = 34;
+  const padL = Math.min(230, Math.max(150, w*0.26)), padR = 56, padT = 20, padB = 6;
+  const h = padT + padB + rows.length*rowH;
+  const v0 = Math.min(0, ...rows.map(s=>Math.min(s.full.cagr, s.biased.cagr)));
+  const v1 = Math.max(...rows.map(s=>Math.max(s.full.cagr, s.biased.cagr)))*1.05;
+  const X = v => padL + (v-v0)/(v1-v0)*(w-padL-padR);
+  const svg = makeSVG(w,h);
+  const g=(tag,at)=>{const n=document.createElementNS(svg.namespaceURI,tag);for(const k in at)n.setAttribute(k,at[k]);svg.appendChild(n);return n;};
+  for (const tv of niceTicksLin(v0, v1, 5)) {
+    const x = X(tv); if (x<padL-1||x>w-padR+1) continue;
+    g("line",{x1:x,x2:x,y1:padT-6,y2:h-padB,stroke:css("--grid")});
+    const tx=g("text",{x,y:padT-10,"text-anchor":"middle",fill:css("--muted"),"font-size":10,"font-family":css("--font-m")});
+    tx.textContent=Math.round(tv*100)+"%";
+  }
+  rows.forEach((s,i)=>{
+    const y = padT + i*rowH;
+    const name=g("text",{x:padL-10,y:y+rowH/2+4,"text-anchor":"end",fill:css("--ink-2"),"font-size":12});
+    name.textContent = s.name;
+    const bb=g("rect",{x:X(Math.min(0,s.biased.cagr)),y:y+4,width:Math.abs(X(s.biased.cagr)-X(0)),height:10,rx:2.5,
+      fill:"none",stroke:css("--muted"),"stroke-width":1,"stroke-dasharray":"3 2"});
+    const hb=g("rect",{x:X(Math.min(0,s.full.cagr)),y:y+16,width:Math.abs(X(s.full.cagr)-X(0)),height:10,rx:2.5,
+      fill:s.full.cagr>=0?css("--s1"):css("--critical")});
+    const d=g("text",{x:X(Math.max(s.full.cagr,0,s.biased.cagr))+8,y:y+rowH/2+4,fill:css("--muted"),
+      "font-size":10.5,"font-family":css("--font-m")});
+    d.textContent = fmtPct(s.full.cagr - s.biased.cagr,1);
+    for (const [r, v, lab] of [[bb, s.biased.cagr, "survivor-only"],[hb, s.full.cagr, "point-in-time"]]) {
+      r.addEventListener("mousemove", ev=>showTip(
+        `<div class="t-date">${s.name} · ${lab}</div><div class="t-row">CAGR<span class="num">${fmtPctU(v)}</span></div>`,
+        ev.clientX,ev.clientY));
+      r.addEventListener("mouseleave",hideTip);
+    }
+  });
+  g("line",{x1:X(0),x2:X(0),y1:padT-6,y2:h-padB,stroke:css("--baseline")});
+  el.appendChild(svg);
+}
+
+/* ---------------- robustness ---------------- */
+function robustness() {
+  const R = DATA.robustness; if (!R) return;
+  // 1. plateau: horizontal dot plot of Sharpe per config
+  const el = document.getElementById("robPlateau"); el.innerHTML="";
+  const rows = R.plateau;
+  const w = Math.max(el.clientWidth||500,300), rowH=26;
+  const padL = Math.min(190, Math.max(130, w*0.3)), padR=40, padT=18, padB=6;
+  const h = padT+padB+rows.length*rowH;
+  const v0 = 0.6, v1 = 1.1;
+  const X = v => padL + (v-v0)/(v1-v0)*(w-padL-padR);
+  const svg = makeSVG(w,h);
+  const g=(tag,at)=>{const n=document.createElementNS(svg.namespaceURI,tag);for(const k in at)n.setAttribute(k,at[k]);svg.appendChild(n);return n;};
+  for (const tv of [0.6,0.7,0.8,0.9,1.0,1.1]) {
+    const x=X(tv);
+    g("line",{x1:x,x2:x,y1:padT-4,y2:h-padB,stroke:css("--grid")});
+    const tx=g("text",{x,y:padT-8,"text-anchor":"middle",fill:css("--muted"),"font-size":10,"font-family":css("--font-m")});
+    tx.textContent=tv.toFixed(1);
+  }
+  rows.forEach((p,i)=>{
+    const y=padT+i*rowH+rowH/2;
+    const name=g("text",{x:padL-10,y:y+3.5,"text-anchor":"end",fill:i===0?css("--ink"):css("--ink-2"),"font-size":11.5,
+      "font-weight":i===0?600:400});
+    name.textContent=p.config;
+    g("line",{x1:padL,x2:w-padR,y1:y,y2:y,stroke:css("--grid")});
+    const c=g("circle",{cx:X(p.sharpe),cy:y,r:i===0?6:4.5,fill:i===0?css("--accent"):css("--s3"),
+      stroke:css("--surface"),"stroke-width":2});
+    c.addEventListener("mousemove",ev=>showTip(
+      `<div class="t-date">${p.config}</div>
+       <div class="t-row">Sharpe<span class="num">${p.sharpe.toFixed(2)}</span></div>
+       <div class="t-row">CAGR<span class="num">${fmtPctU(p.cagr)}</span></div>
+       <div class="t-row">max DD<span class="num">${fmtPctU(p.max_dd)}</span></div>`,ev.clientX,ev.clientY));
+    c.addEventListener("mouseleave",hideTip);
+  });
+  el.appendChild(svg);
+
+  // 2. bootstrap rows
+  const b = R.bootstrap;
+  const row = (lab, lo, md, hi, fmt) => `<div class="mrow">
+    <span class="lab">${lab}</span><span class="col num">${fmt(lo)}</span>
+    <span class="col num" style="color:var(--accent);font-weight:600">${fmt(md)}</span><span class="col num">${fmt(hi)}</span></div>`;
+  document.getElementById("robBoot").innerHTML =
+    `<div class="mrow hd"><span class="lab"></span><span class="col">5th pct</span><span class="col">median</span><span class="col">95th pct</span></div>` +
+    row("CAGR", ...b.cagr_ci, v=>fmtPctU(v)) +
+    row("Sharpe", ...b.sharpe_ci, v=>v.toFixed(2)) +
+    row("Max drawdown", ...b.maxdd_ci, v=>fmtPctU(v,0)) +
+    `<div class="mrow"><span class="lab">P(profit over full period)</span><span class="col"></span>
+     <span class="col num" style="color:var(--up);font-weight:600">${Math.round(b.p_cagr_gt0*100)}%</span><span class="col"></span></div>`;
+
+  // 3. rebalance shift
+  const el3 = document.getElementById("robShift"); el3.innerHTML="";
+  const sh = R.rebal_shift;
+  const w3 = Math.max(el3.clientWidth||500,300), h3=120;
+  const p3L=46,p3R=16,p3T=12,p3B=24;
+  const x0=-3.5,x1=3.5,c0=0.10,c1=0.15;
+  const X3=v=>p3L+(v-x0)/(x1-x0)*(w3-p3L-p3R), Y3=v=>p3T+(c1-v)/(c1-c0)*(h3-p3T-p3B);
+  const svg3=makeSVG(w3,h3);
+  const g3=(tag,at)=>{const n=document.createElementNS(svg3.namespaceURI,tag);for(const k in at)n.setAttribute(k,at[k]);svg3.appendChild(n);return n;};
+  for (const tv of [0.10,0.12,0.14]) {
+    g3("line",{x1:p3L,x2:w3-p3R,y1:Y3(tv),y2:Y3(tv),stroke:css("--grid")});
+    const tx=g3("text",{x:p3L-8,y:Y3(tv)+3.5,"text-anchor":"end",fill:css("--muted"),"font-size":10,"font-family":css("--font-m")});
+    tx.textContent=Math.round(tv*100)+"%";
+  }
+  sh.forEach(p=>{
+    const tx=g3("text",{x:X3(p.offset),y:h3-p3B+15,"text-anchor":"middle",fill:css("--muted"),"font-size":10,"font-family":css("--font-m")});
+    tx.textContent=(p.offset>0?"+":"")+p.offset+"d";
+    const c=g3("circle",{cx:X3(p.offset),cy:Y3(p.cagr),r:p.offset===0?6:4.5,
+      fill:p.offset===0?css("--accent"):css("--s3"),stroke:css("--surface"),"stroke-width":2});
+    c.addEventListener("mousemove",ev=>showTip(
+      `<div class="t-date">rebalance ${p.offset===0?"on month-end":(p.offset>0?p.offset+" days after":(-p.offset)+" days before")+" month-end"}</div>
+       <div class="t-row">CAGR<span class="num">${fmtPctU(p.cagr)}</span></div>
+       <div class="t-row">Sharpe<span class="num">${p.sharpe.toFixed(2)}</span></div>`,ev.clientX,ev.clientY));
+    c.addEventListener("mouseleave",hideTip);
+  });
+  g3("line",{x1:p3L,x2:w3-p3R,y1:h3-p3B,y2:h3-p3B,stroke:css("--baseline")});
+  el3.appendChild(svg3);
+}
+
+renderBoard(); renderDetail(); heat(); holdings(); biasChart(); robustness();
 let rAF;
 addEventListener("resize", ()=>{ cancelAnimationFrame(rAF);
-  rAF=requestAnimationFrame(()=>{ heroDraw(); renderDetail(); }); });
+  rAF=requestAnimationFrame(()=>{ heroDraw(); renderDetail(); biasChart(); robustness(); }); });
 </script>

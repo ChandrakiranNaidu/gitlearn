@@ -26,7 +26,7 @@ def eval_weights(w, panel):
 
 
 def main():
-    panel = load_panel()
+    panel = load_panel(point_in_time="--pit" in __import__("sys").argv)
     results = []
 
     grid = list(itertools.product(
@@ -52,7 +52,7 @@ def main():
         print(".", end="", flush=True)
 
     # combos: momentum sleeve + low-vol sleeve
-    for mshare in [0.4, 0.5, 0.6, 0.7]:
+    for mshare in [0.2, 0.3, 0.4, 0.5, 0.6, 0.7]:
         wm = mom_blend_bands(panel, top_n=10, hold_band=18)
         wl = low_vol(panel, top_n=10)
         w = wm * mshare + wl * (1 - mshare)
@@ -76,7 +76,7 @@ def main():
         index=False,
         formatters={c: (lambda v: f"{v*100:5.1f}%") for c in
                     ["is_cagr", "oos_cagr", "full_cagr", "full_dd"]}))
-    df.to_csv("sweep_results.csv", index=False)
+    df.to_csv("sweep_results_pit.csv" if "--pit" in __import__("sys").argv else "sweep_results.csv", index=False)
 
 
 if __name__ == "__main__":
